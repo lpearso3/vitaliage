@@ -1,5 +1,6 @@
 import express from "express";
 import cors from "cors";
+import { randomUUID } from "node:crypto";
 
 const app = express();
 
@@ -28,7 +29,7 @@ app.post("/devices", (req, res) => {
   }
 
   const entry = {
-    id: crypto.randomUUID(),
+    id: randomUUID(),
     userId,
     platform: String(platform).toLowerCase(),
     token,
