@@ -10,17 +10,21 @@ app.set("trust proxy", 1);
 app.use(cors({ origin: "*", methods: ["GET", "POST", "OPTIONS"] }));
 app.use(express.json({ limit: "1mb" }));
 
-// Supabase
+// --- Shared helpers / regex ---
+const uuidRegex =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+
+// --- Supabase client ---
 const supabase = createClient(
   process.env.SUPABASE_URL,
   process.env.SUPABASE_SERVICE_KEY
 );
 
-// Health
+// --- Health routes ---
 app.get("/", (_req, res) => res.send("Vitaliage Push API ✅"));
 app.get("/ping", (_req, res) => res.json({ ok: true }));
 
-// DB connectivity
+// --- DB connectivity check ---
 app.get("/db-check", async (_req, res) => {
   try {
     const { data, error } = await supabase.from("devices").select("*").limit(1);
@@ -35,13 +39,11 @@ app.get("/db-check", async (_req, res) => {
   }
 });
 
-// UPSERT device
+// --- UPSERT device token ---
 app.post("/devices", async (req, res) => {
   const { userId, platform = "ios", token } = req.body || {};
   if (!token) return res.status(400).json({ error: "Missing token" });
 
-  const uuidRegex =
-    /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
   const cleanUserId = uuidRegex.test(userId || "") ? userId : null;
 
   try {
@@ -51,6 +53,7 @@ app.post("/devices", async (req, res) => {
         onConflict: "token",
         returning: "minimal",
       });
+
     if (error) {
       return res.status(500).json({
         error: "Database upsert failed",
@@ -58,6 +61,7 @@ app.post("/devices", async (req, res) => {
       });
     }
 
+    // Best-effort last_seen update (ignore errors)
     try {
       await supabase
         .from("devices")
@@ -82,7 +86,7 @@ app.post("/devices", async (req, res) => {
   }
 });
 
-// --- Push handler + routes
+// --- Push handler used by /push, /api/push, /push/send ---
 async function handleSend(req, res) {
   const {
     token,
@@ -123,7 +127,97 @@ app.post("/push", handleSend);
 app.post("/api/push", handleSend);
 app.post("/push/send", handleSend);
 
-// Debug: list routes
+// --- NEW: push to the most recent active device ---
+// Optional body:
+//   {
+//     "userId": "<uuid>",        // optional, filter by user
+//     "title": "Optional title",
+//     "body": "Optional body",
+//     "data": { ... },           // optional custom payload
+//     "silent": false,           // optional
+//     "collapseId": "...",       // optional
+//     "priority": "10",          // optional
+//     "pushType": "alert"        // or "background"
+//   }
+app.post("/push-latest", async (req, res) => {
+  try {
+    const {
+      userId,
+      title = "Test from /push-latest",
+      body = "This went to the most recent device",
+      data,
+      silent = false,
+      collapseId,
+      priority,
+      pushType,
+    } = req.body || {};
+
+    // Build base query: only active devices
+    let query = supabase
+      .from("devices")
+      .select("id,user_id,platform,token,active,last_seen,created_at")
+      .eq("active", true);
+
+    // If a valid userId is provided, filter by that user
+    if (userId && uuidRegex.test(userId)) {
+      query = query.eq("user_id", userId);
+    }
+
+    // Order by most recently seen
+    query = query.order("last_seen", { ascending: false }).limit(1);
+
+    const { data: rows, error } = await query;
+
+    if (error) {
+      console.error("Supabase error in /push-latest:", error);
+      return res
+        .status(500)
+        .json({ ok: false, error: "Supabase query failed", detail: error.message });
+    }
+
+    if (!rows || rows.length === 0) {
+      return res.status(404).json({
+        ok: false,
+        error: "No active devices found",
+        detail: userId ? "No active devices for this user" : "No devices in table",
+      });
+    }
+
+    const device = rows[0];
+    const effectivePushType = pushType || (silent ? "background" : "alert");
+
+    const result = await sendPush(
+      device.token,
+      { title, body, data },
+      { pushType: effectivePushType, priority, collapseId }
+    );
+
+    const ok = Number(result.status) === 200;
+
+    return res.status(ok ? 200 : result.status || 400).json({
+      ok,
+      status: result.status,
+      device: {
+        id: device.id,
+        user_id: device.user_id,
+        platform: device.platform,
+        token: device.token,
+        active: device.active,
+        last_seen: device.last_seen,
+        created_at: device.created_at,
+      },
+      apns: result.body || null,
+      headers: result.headers || null,
+    });
+  } catch (err) {
+    console.error("Error in /push-latest:", err);
+    return res
+      .status(500)
+      .json({ ok: false, error: "Internal server error", detail: err.message });
+  }
+});
+
+// --- Debug: list all registered routes ---
 function listRoutes() {
   const out = [];
   app._router?.stack?.forEach((m) => {
@@ -136,10 +230,11 @@ function listRoutes() {
   });
   return out;
 }
+
 app.get("/__routes", (_req, res) => res.json(listRoutes()));
 
+// --- Start server ---
 const PORT = process.env.PORT || 3001;
 app.listen(PORT, () => {
   console.log(`✅ Server running on http://localhost:${PORT}`);
 });
-

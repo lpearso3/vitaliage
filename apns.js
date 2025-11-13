@@ -3,7 +3,7 @@ const http2 = require("http2");
 const jwt = require("jsonwebtoken");
 
 // Required environment variables
-const APNS_KEY_ID = process.env.APNS_KEY_ID;        // e.g. "55KBB26SX8"
+const APNS_KEY_ID = process.env.APNS_KEY_ID;        // e.g. "AB12CD34EF"
 const APNS_TEAM_ID = process.env.APNS_TEAM_ID;      // e.g. "HT57Y848P"
 const APNS_BUNDLE_ID = process.env.APNS_BUNDLE_ID;  // e.g. "com.vitaliage"
 const APNS_ENV =
@@ -26,19 +26,30 @@ if (!APNS_KEY_PEM || !APNS_KEY_PEM.includes("BEGIN PRIVATE KEY")) {
 
 // Create JWT for APNs auth
 function createJwt() {
-  return jwt.sign(
-    {},
-    APNS_KEY_PEM,
-    {
-      algorithm: "ES256",
-      issuer: APNS_TEAM_ID,
-      header: {
-        alg: "ES256",
-        kid: APNS_KEY_ID,
-      },
-      expiresIn: "1h",
-    }
-  );
+  const now = Math.floor(Date.now() / 1000);
+
+  const payload = {
+    iss: APNS_TEAM_ID,
+    iat: now,
+  };
+
+  const token = jwt.sign(payload, APNS_KEY_PEM, {
+    algorithm: "ES256",
+    header: {
+      alg: "ES256",
+      kid: APNS_KEY_ID,
+    },
+  });
+
+  // Debug log so we can see what APNs sees
+  try {
+    const decoded = jwt.decode(token, { complete: true });
+    console.log("🔎 APNs JWT decoded:", JSON.stringify(decoded, null, 2));
+  } catch (e) {
+    console.error("Failed to decode APNs JWT:", e);
+  }
+
+  return token;
 }
 
 /**
@@ -147,3 +158,4 @@ function sendPush(deviceToken, payload = {}, options = {}) {
 }
 
 module.exports = { sendPush };
+
