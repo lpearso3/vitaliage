@@ -128,17 +128,6 @@ app.post("/api/push", handleSend);
 app.post("/push/send", handleSend);
 
 // --- NEW: push to the most recent active device ---
-// Optional body:
-//   {
-//     "userId": "<uuid>",        // optional, filter by user
-//     "title": "Optional title",
-//     "body": "Optional body",
-//     "data": { ... },           // optional custom payload
-//     "silent": false,           // optional
-//     "collapseId": "...",       // optional
-//     "priority": "10",          // optional
-//     "pushType": "alert"        // or "background"
-//   }
 app.post("/push-latest", async (req, res) => {
   try {
     const {
@@ -214,6 +203,24 @@ app.post("/push-latest", async (req, res) => {
     return res
       .status(500)
       .json({ ok: false, error: "Internal server error", detail: err.message });
+  }
+});
+
+// --- NEW: receive daily health snapshot from iOS app ---
+app.post("/snapshot", (req, res) => {
+  try {
+    const snapshot = req.body || {};
+
+    console.log("📥 Received /snapshot payload:");
+    console.log(JSON.stringify(snapshot, null, 2));
+
+    // TODO: in the future, validate and store in Supabase:
+    // await supabase.from("snapshots").insert({ ...snapshot, user_id: ... })
+
+    return res.status(200).json({ ok: true });
+  } catch (err) {
+    console.error("Error in /snapshot:", err);
+    return res.status(500).json({ ok: false, error: "internal_error" });
   }
 });
 
