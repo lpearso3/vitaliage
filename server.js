@@ -280,6 +280,105 @@ app.post("/snapshot", async (req, res) => {
   }
 });
 
+// --- NEW: fetch daily snapshots for a user/date range ---
+app.get("/daily-snapshots", async (req, res) => {
+  try {
+    const { userId, from, to, limit } = req.query;
+
+    let query = supabase
+      .from("daily_snapshots")
+      .select(
+        `
+        id,
+        user_id,
+        external_id,
+        snapshot_date,
+        steps,
+        resting_hr,
+        vo2_max,
+        hrv,
+        respiratory_rate,
+        activity_energy,
+        stand_hours,
+        bp_systolic,
+        bp_diastolic,
+        glucose_mg_dl,
+        sleep_total_minutes,
+        sleep_goal_minutes,
+        sleep_met_goal,
+        raw_json
+      `
+      )
+      .order("snapshot_date", { ascending: false });
+
+    // Optional: filter by userId if it's a valid UUID
+    if (userId && uuidRegex.test(userId)) {
+      query = query.eq("user_id", userId);
+    }
+
+    // Optional: date range filters (from/to are ISO strings)
+    if (from) {
+      query = query.gte("snapshot_date", from);
+    }
+    if (to) {
+      query = query.lte("snapshot_date", to);
+    }
+
+    // Optional: limit (default 7)
+    const effectiveLimit = Number(limit) > 0 ? Number(limit) : 7;
+    query = query.limit(effectiveLimit);
+
+    const { data, error } = await query;
+
+    if (error) {
+      console.error("❌ Supabase error in GET /daily-snapshots:", error);
+      return res.status(500).json({
+        ok: false,
+        error: "db_query_failed",
+        detail: error.message || error.code,
+      });
+    }
+
+    const snapshots = (data || []).map((row) => {
+      const sleep =
+        row.sleep_total_minutes != null ||
+        row.sleep_goal_minutes != null ||
+        row.sleep_met_goal != null
+          ? {
+              totalMinutes: row.sleep_total_minutes,
+              goalMinutes: row.sleep_goal_minutes,
+              metGoal: row.sleep_met_goal,
+            }
+          : null;
+
+      return {
+        id: row.external_id || row.id,
+        userId: row.user_id,
+        date: row.snapshot_date,
+        steps: row.steps,
+        restingHR: row.resting_hr,
+        vo2Max: row.vo2_max,
+        hrv: row.hrv,
+        respiratoryRate: row.respiratory_rate,
+        activityEnergy: row.activity_energy,
+        standHours: row.stand_hours,
+        bpSystolic: row.bp_systolic,
+        bpDiastolic: row.bp_diastolic,
+        glucoseMgDl: row.glucose_mg_dl,
+        sleep,
+        raw: row.raw_json,
+      };
+    });
+
+    return res.json({ ok: true, snapshots });
+  } catch (err) {
+    console.error("Error in GET /daily-snapshots:", err);
+    return res
+      .status(500)
+      .json({ ok: false, error: "internal_error", detail: err.message });
+  }
+});
+
 // --- Debug: list all registered routes ---
 function listRoutes() {
   const out = [];
