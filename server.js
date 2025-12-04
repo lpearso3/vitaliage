@@ -206,21 +206,77 @@ app.post("/push-latest", async (req, res) => {
   }
 });
 
-// --- NEW: receive daily health snapshot from iOS app ---
-app.post("/snapshot", (req, res) => {
+// --- UPDATED: receive daily health snapshot from iOS app and store in Supabase ---
+app.post("/snapshot", async (req, res) => {
   try {
     const snapshot = req.body || {};
 
-    console.log("📥 Received /snapshot payload:");
+    console.log("📬 Received /snapshot payload:");
     console.log(JSON.stringify(snapshot, null, 2));
 
-    // TODO: in the future, validate and store in Supabase:
-    // await supabase.from("snapshots").insert({ ...snapshot, user_id: ... })
+    const {
+      userId,            // optional; can be null
+      id: externalId,    // DailySnapshotDTO.id
+      date,              // ISO string from app, e.g. 2025-11-30T06:00:00Z
+      steps,
+      restingHR,
+      vo2Max,
+      hrv,
+      respiratoryRate,
+      activityEnergy,
+      standHours,
+      bpSystolic,
+      bpDiastolic,
+      glucoseMgDl,
+      sleep,             // { totalMinutes, goalMinutes, metGoal }
+    } = snapshot;
+
+    const cleanUserId = uuidRegex.test(userId || "") ? userId : null;
+
+    const row = {
+      user_id: cleanUserId,
+      external_id: externalId || null,
+      snapshot_date: date || new Date().toISOString(),
+
+      steps,
+      resting_hr: restingHR,
+      vo2_max: vo2Max,
+
+      hrv,
+      respiratory_rate: respiratoryRate,
+      activity_energy: activityEnergy,
+      stand_hours: standHours,
+      bp_systolic: bpSystolic,
+      bp_diastolic: bpDiastolic,
+      glucose_mg_dl: glucoseMgDl,
+
+      sleep_total_minutes: sleep?.totalMinutes ?? null,
+      sleep_goal_minutes: sleep?.goalMinutes ?? null,
+      sleep_met_goal:
+        typeof sleep?.metGoal === "boolean" ? sleep.metGoal : null,
+
+      raw_json: snapshot,
+    };
+
+    const { error } = await supabase
+      .from("daily_snapshots")
+      .insert(row);
+
+    if (error) {
+      console.error("❌ Supabase insert error in /snapshot:", error);
+      return res.status(500).json({
+        ok: false,
+        error: "db_insert_failed",
+        detail: error.message || error.code,
+      });
+    }
 
     return res.status(200).json({ ok: true });
   } catch (err) {
     console.error("Error in /snapshot:", err);
-    return res.status(500).json({ ok: false, error: "internal_error" });
+    return res
+      .status(500)
+      .json({ ok: false, error: "internal_error", detail: err.message });
   }
 });
 
