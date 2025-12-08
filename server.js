@@ -2,6 +2,7 @@
 const express = require("express");
 const cors = require("cors");
 const { createClient } = require("@supabase/supabase-js");
+const path = require("path");               // 👈 NEW
 require("dotenv").config();
 const { sendPush } = require("./apns");
 
@@ -9,6 +10,21 @@ const app = express();
 app.set("trust proxy", 1);
 app.use(cors({ origin: "*", methods: ["GET", "POST", "OPTIONS"] }));
 app.use(express.json({ limit: "1mb" }));
+
+// 👇 NEW: static file hosting for dashboard build
+// Serve any general static assets from /public (optional but handy)
+app.use(express.static(path.join(__dirname, "public")));
+
+// Serve the React dashboard under /dashboard
+app.use(
+  "/dashboard",
+  express.static(path.join(__dirname, "public", "dashboard"))
+);
+
+// SPA fallback for any /dashboard/* route
+app.get("/dashboard/*", (_req, res) => {
+  res.sendFile(path.join(__dirname, "public", "dashboard", "index.html"));
+});
 
 // --- Shared helpers / regex ---
 const uuidRegex =
