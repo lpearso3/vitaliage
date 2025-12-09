@@ -1,4 +1,3 @@
-// mw-core.js
 (function () {
   const MW = window.mwCore || {};
 
@@ -373,153 +372,247 @@
   MW.computeReadinessScore = MW.computeReadinessScore || computeReadinessScore;
 
   // -----------------------------
-  // Readiness from a series of snapshots
+  // Readiness from a series of snapshots (new canonical helper)
   // -----------------------------
-  function computeReadinessFromSnapshots(snaps) {
-    const sorted = sortByDateAsc(snaps || []);
-    if (!sorted.length) {
+  /**
+   * Compute readiness from a series of daily snapshots.
+   *
+   * @param {Array<Object>} snapshots - most recent first or last (order agnostic, we sort)
+   * @param {Object} [profileOverride] - optional { age, sex, trainingLevel } (reserved for future use)
+   * @returns {{
+   *   score: number,
+   *   state: 'ready' | 'easy' | 'rest',
+   *   reasons: string[],
+   *   components: {
+   *     sleepScore: number,
+   *     hrvScore: number,
+   *     rhrScore: number,
+   *     stepsScore: number,
+   *     sleep7DayAdherence: number | null,
+   *     nightsMeetingGoal: number | null,
+   *     hrvDeltaPct: number | null,
+   *     rhrDelta: number | null,
+   *     stepsAvg: number | null
+   *   },
+   *   // backward-compat convenience fields:
+   *   readinessScore: number,
+   *   stepsAvg: number | null
+   * }}
+   */
+  function computeReadinessFromSnapshots(snapshots, profileOverride) {
+    if (!Array.isArray(snapshots) || snapshots.length === 0) {
       return {
+        score: 50,
+        state: 'easy',
+        reasons: ['Not enough data yet to calculate readiness.'],
+        components: {
+          sleepScore: 50,
+          hrvScore: 50,
+          rhrScore: 50,
+          stepsScore: 50,
+          sleep7DayAdherence: null,
+          nightsMeetingGoal: null,
+          hrvDeltaPct: null,
+          rhrDelta: null,
+          stepsAvg: null
+        },
         readinessScore: 50,
-        state: "easy",
-        reasons: ["Limited recent data – taking a neutral starting point."],
-        hrvToday: null,
-        rhrToday: null,
-        stepsAvg: null,
-        vo2: null,
-        vo2Info: null
+        stepsAvg: null
       };
     }
 
-    const today = sorted[sorted.length - 1];
-    const past = sorted.slice(0, -1);
+    // Sort ascending by date, then keep last 7
+    const snaps = sortByDateAsc(snapshots)
+      .slice(-7);
 
-    // Sleep adherence (multi-day)
-    const sleepRatios = sorted
-      .map(s => {
-        const sl = s.sleep || {};
-        const t = typeof sl.totalMinutes === "number" ? sl.totalMinutes : null;
-        const g = typeof sl.goalMinutes === "number" ? sl.goalMinutes : null;
-        if (!t || !g || g <= 0) return null;
-        return Math.min(1.2, t / g); // cap
-      })
+    const n = snaps.length;
+    const today = snaps[n - 1];
+
+    // ---- Sleep metrics ----
+    let sleepMinutesSum = 0;
+    let sleepGoalMinutesSum = 0;
+    let nightsWithSleep = 0;
+    let nightsMeetingGoal = 0;
+
+    snaps.forEach(s => {
+      if (s.sleep && typeof s.sleep.totalMinutes === 'number' && typeof s.sleep.goalMinutes === 'number') {
+        sleepMinutesSum += s.sleep.totalMinutes;
+        sleepGoalMinutesSum += s.sleep.goalMinutes;
+        nightsWithSleep++;
+        if (s.sleep.metGoal === true || s.sleep.totalMinutes >= s.sleep.goalMinutes) {
+          nightsMeetingGoal++;
+        }
+      }
+    });
+
+    const sleep7DayAdherence = (sleepGoalMinutesSum > 0)
+      ? (sleepMinutesSum / sleepGoalMinutesSum) // ratio
+      : null;
+
+    // Sleep score: 0–100
+    let sleepScore = 50;
+    if (sleep7DayAdherence != null) {
+      const ratio = Math.min(sleep7DayAdherence, 1.2); // cap slight overage
+      sleepScore = Math.round(Math.max(0, Math.min(100, ratio * 100)));
+      if (sleepScore < 50 && nightsMeetingGoal >= 4) {
+        // If they hit goal most nights but minutes ratio is off a bit, soften penalty
+        sleepScore = Math.max(sleepScore, 60);
+      }
+    }
+
+    // ---- HRV metrics ----
+    const hrvValues = snaps
+      .map(s => (typeof s.hrv === 'number' ? s.hrv : null))
       .filter(v => v != null);
 
-    const sleepAdherenceAvg = sleepRatios.length ? avg(sleepRatios) : null;
-
-    // HRV baseline vs today
-    const hrvToday = typeof today.hrv === "number" ? today.hrv : null;
-    const hrvBaseline = past.length
-      ? avg(past.map(p => (typeof p.hrv === "number" ? p.hrv : null)))
+    const hrvToday = (typeof today.hrv === 'number') ? today.hrv : null;
+    const hrvAvg = (hrvValues.length > 0)
+      ? (hrvValues.reduce((a, b) => a + b, 0) / hrvValues.length)
       : null;
 
-    // Resting HR baseline vs today
-    const rhrToday = typeof today.restingHR === "number" ? today.restingHR : null;
-    const rhrBaseline = past.length
-      ? avg(past.map(p => (typeof p.restingHR === "number" ? p.restingHR : null)))
+    let hrvDeltaPct = null;
+    let hrvScore = 50;
+
+    if (hrvToday != null && hrvAvg && hrvAvg > 0) {
+      hrvDeltaPct = ((hrvToday - hrvAvg) / hrvAvg) * 100;
+      // +20% or more => 100, -20% => ~0
+      const raw = 50 + (hrvDeltaPct / 20) * 50;
+      hrvScore = Math.round(Math.max(0, Math.min(100, raw)));
+    }
+
+    // ---- Resting HR metrics ----
+    const rhrValues = snaps
+      .map(s => (typeof s.restingHR === 'number' ? s.restingHR : null))
+      .filter(v => v != null);
+
+    const rhrToday = (typeof today.restingHR === 'number') ? today.restingHR : null;
+    const rhrAvg = (rhrValues.length > 0)
+      ? (rhrValues.reduce((a, b) => a + b, 0) / rhrValues.length)
       : null;
 
-    // Steps average
-    const stepsAvg = avg(sorted.map(s => (typeof s.steps === "number" ? s.steps : null)));
+    let rhrDelta = null;
+    let rhrScore = 50;
 
-    // VO2 from latest day
-    const vo2 = typeof today.vo2Max === "number" ? today.vo2Max : null;
-    const vo2Info = vo2 != null ? classifyVo2(vo2, resolveProfileForVo2()) : null;
+    if (rhrToday != null && rhrAvg != null) {
+      rhrDelta = rhrToday - rhrAvg; // + is worse
+      // +15 bpm => 0, -10 bpm => 100
+      let raw;
+      if (rhrDelta >= 15) raw = 0;
+      else if (rhrDelta <= -10) raw = 100;
+      else {
+        // interpolate between +15 -> 0, -10 -> 100
+        const range = 25; // from -10 to +15
+        const pos = (15 - rhrDelta) / range; // 0–1
+        raw = pos * 100;
+      }
+      rhrScore = Math.round(Math.max(0, Math.min(100, raw)));
+    }
 
-    let score = 100;
+    // ---- Steps metrics ----
+    const stepValues = snaps
+      .map(s => (typeof s.steps === 'number' ? s.steps : null))
+      .filter(v => v != null);
+
+    const stepsAvg = (stepValues.length > 0)
+      ? (stepValues.reduce((a, b) => a + b, 0) / stepValues.length)
+      : null;
+
+    let stepsScore = 50;
+    if (stepsAvg != null) {
+      // 3k => 40, 7k => 70, 10k => 100, simple clamp
+      if (stepsAvg <= 3000) stepsScore = 40;
+      else if (stepsAvg >= 10000) stepsScore = 100;
+      else {
+        const t = (stepsAvg - 3000) / 7000; // 0–1 between 3k and 10k
+        stepsScore = Math.round(40 + t * 60);
+      }
+    }
+
+    // ---- Weights & composite score ----
+    const wSleep = 0.4;
+    const wHrv = 0.3;
+    const wRhr = 0.2;
+    const wSteps = 0.1;
+
+    let weights = { sleep: wSleep, hrv: wHrv, rhr: wRhr, steps: wSteps };
+
+    function normalizeWeights(mask) {
+      let total = 0;
+      Object.keys(weights).forEach(k => {
+        if (mask[k]) total += weights[k];
+        else weights[k] = 0;
+      });
+      if (total <= 0) return;
+      Object.keys(weights).forEach(k => {
+        if (mask[k]) weights[k] = weights[k] / total;
+      });
+    }
+
+    normalizeWeights({
+      sleep: sleep7DayAdherence != null,
+      hrv: hrvAvg != null && hrvToday != null,
+      rhr: rhrAvg != null && rhrToday != null,
+      steps: stepsAvg != null
+    });
+
+    const rawScore =
+      (sleepScore * weights.sleep) +
+      (hrvScore * weights.hrv) +
+      (rhrScore * weights.rhr) +
+      (stepsScore * weights.steps);
+
+    const finalScore = clamp(Math.round(rawScore), 0, 100);
+
+    let state = 'easy';
+    if (finalScore >= 70) state = 'ready';
+    else if (finalScore <= 40) state = 'rest';
+
+    // ---- Reasons (short text bullets) ----
     const reasons = [];
 
-    // Sleep
-    if (sleepAdherenceAvg != null) {
-      if (sleepAdherenceAvg >= 1.0) {
-        reasons.push("Sleep has been on target or slightly above your goal.");
-      } else if (sleepAdherenceAvg >= 0.8) {
-        score -= 10;
-        reasons.push("Sleep has been slightly below your goal recently.");
-      } else if (sleepAdherenceAvg >= 0.6) {
-        score -= 20;
-        reasons.push("Sleep has been consistently below goal, which can reduce recovery.");
-      } else {
-        score -= 30;
-        reasons.push("Significant sleep debt over the last week.");
-      }
-    } else {
-      reasons.push("Not enough consistent sleep data to calibrate readiness from sleep.");
-      score -= 5;
+    if (sleep7DayAdherence != null) {
+      const pct = Math.round(sleep7DayAdherence * 100);
+      if (pct >= 95) reasons.push('Sleep has been on target most nights.');
+      else if (pct <= 75) reasons.push('Sleep has been below your target recently.');
     }
 
-    // HRV
-    if (hrvBaseline != null && hrvToday != null && hrvBaseline > 0) {
-      const hrvDeltaPct = (hrvToday - hrvBaseline) / hrvBaseline;
-      if (hrvDeltaPct >= 0.1) {
-        reasons.push("HRV is above your recent baseline – good recovery signal.");
-      } else if (hrvDeltaPct >= 0) {
-        score -= 5;
-        reasons.push("HRV is near baseline – neutral recovery signal.");
-      } else if (hrvDeltaPct >= -0.2) {
-        score -= 15;
-        reasons.push("HRV is slightly below baseline – recovery may be incomplete.");
-      } else {
-        score -= 25;
-        reasons.push("HRV is well below baseline – body may need more recovery.");
-      }
-    } else {
-      reasons.push("HRV data is limited; using other metrics more heavily.");
-      score -= 5;
+    if (hrvDeltaPct != null) {
+      if (hrvDeltaPct >= 15) reasons.push('HRV is well above your usual baseline.');
+      else if (hrvDeltaPct <= -15) reasons.push('HRV is below your usual baseline.');
     }
 
-    // Resting HR
-    if (rhrBaseline != null && rhrToday != null) {
-      const delta = rhrToday - rhrBaseline;
-      if (delta <= 1) {
-        reasons.push("Resting heart rate is stable vs your recent baseline.");
-      } else if (delta <= 5) {
-        score -= 10;
-        reasons.push("Resting heart rate is mildly elevated vs baseline.");
-      } else if (delta <= 10) {
-        score -= 20;
-        reasons.push("Resting heart rate is noticeably elevated – suggests strain or stress.");
-      } else {
-        score -= 30;
-        reasons.push("Resting heart rate is significantly elevated – strong sign to ease off.");
-      }
-    } else {
-      reasons.push("Limited resting heart rate data, relying more on other signals.");
-      score -= 5;
+    if (rhrDelta != null) {
+      if (rhrDelta <= -5) reasons.push('Resting heart rate is lower than usual.');
+      else if (rhrDelta >= 5) reasons.push('Resting heart rate is higher than usual.');
     }
 
-    // Steps / activity
     if (stepsAvg != null) {
-      if (stepsAvg >= 8000) {
-        reasons.push("Activity volume has been solid over the last week.");
-      } else if (stepsAvg >= 5000) {
-        score -= 5;
-        reasons.push("Activity volume is moderate – fine, but could be improved.");
-      } else if (stepsAvg >= 3000) {
-        score -= 10;
-        reasons.push("Activity has been on the low side recently.");
-      } else {
-        score -= 15;
-        reasons.push("Very low activity volume over the last week.");
-      }
-    } else {
-      reasons.push("No recent step data; cannot factor daily activity into readiness.");
+      if (stepsAvg >= 8000) reasons.push('Activity levels have been solid.');
+      else if (stepsAvg <= 4000) reasons.push('Activity has been on the lower side.');
     }
 
-    score = clamp(Math.round(score), 0, 100);
-
-    let state = "easy";
-    if (score >= 75) state = "ready";
-    else if (score < 55) state = "rest";
+    if (reasons.length === 0) {
+      reasons.push('Limited data, so this readiness is approximate.');
+    }
 
     return {
-      readinessScore: score,
+      score: finalScore,
       state,
       reasons,
-      hrvToday,
-      rhrToday,
-      stepsAvg,
-      vo2,
-      vo2Info
+      components: {
+        sleepScore,
+        hrvScore,
+        rhrScore,
+        stepsScore,
+        sleep7DayAdherence,
+        nightsMeetingGoal: nightsWithSleep ? nightsMeetingGoal : null,
+        hrvDeltaPct,
+        rhrDelta,
+        stepsAvg
+      },
+      // convenience / backward-compat:
+      readinessScore: finalScore,
+      stepsAvg
     };
   }
 
@@ -528,7 +621,7 @@
   // -----------------------------
   // Version + export
   // -----------------------------
-  MW.version = MW.version || "1.0.0";
+  MW.version = MW.version || "1.1.0";
 
   window.mwCore = MW;
 
