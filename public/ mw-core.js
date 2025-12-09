@@ -622,6 +622,25 @@
   // Version + export
   // -----------------------------
   MW.version = MW.version || "1.1.0";
+  // -----------------------------
+  // Global aliases for backward compatibility
+  // -----------------------------
+  window.getSettingsSafe      = window.getSettingsSafe      || getSettingsSafe;
+  window.getSettings          = window.getSettings          || MW.getSettings;
+  window.glucoseUnit          = window.glucoseUnit          || glucoseUnit;
+
+  window.getProfile           = window.getProfile           || getProfile;
+  window.resolveProfileForVo2 = window.resolveProfileForVo2 || resolveProfileForVo2;
+  window.getVo2Ref            = window.getVo2Ref            || getVo2Ref;
+  window.vo2RangeForProfile   = window.vo2RangeForProfile   || vo2RangeForProfile;
+  window.classifyVo2          = window.classifyVo2          || classifyVo2;
+
+  window.getApiBaseUrl        = window.getApiBaseUrl        || getApiBaseUrl;
+  window.fetchDailySnapshots  = window.fetchDailySnapshots  || fetchDailySnapshots;
+
+  // Optional, if you ever want direct access:
+  window.computeReadinessFromSnapshots =
+    window.computeReadinessFromSnapshots || computeReadinessFromSnapshots;
 
   window.mwCore = MW;
 
