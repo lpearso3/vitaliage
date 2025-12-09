@@ -3,13 +3,41 @@
   const MW = window.mwCore || {};
 
   // -----------------------------
-  // Settings helpers
+  // Keys & small helpers
   // -----------------------------
   const SETTINGS_KEY = 'mw_settings';
   const DEV_KEY = 'mw_dev_cfg';
 
+  function clamp(x, min, max) {
+    if (x == null || isNaN(x)) return min;
+    return Math.min(max, Math.max(min, x));
+  }
+
+  function avg(values) {
+    const items = (values || []).filter(v => typeof v === 'number' && !isNaN(v));
+    if (!items.length) return null;
+    const sum = items.reduce((a, b) => a + b, 0);
+    return sum / items.length;
+  }
+
+  function toDate(d) {
+    try { return new Date(d); } catch { return null; }
+  }
+
+  function sortByDateAsc(snaps) {
+    return [...(snaps || [])].sort((a, b) => {
+      const da = toDate(a.date)?.getTime() || 0;
+      const db = toDate(b.date)?.getTime() || 0;
+      return da - db;
+    });
+  }
+
+  // -----------------------------
+  // Settings helpers
+  // -----------------------------
   function getSettingsSafe() {
     try {
+      // If Settings tab has already attached window.getSettings(), prefer that
       if (typeof window.getSettings === "function") {
         const s = window.getSettings();
         return s && typeof s === "object" ? s : {};
@@ -30,6 +58,41 @@
     return s || {};
   };
 
+  // Units (glucose)
+  function glucoseUnit() {
+    const s = getSettingsSafe();
+    const units = (s && s.units) || {};
+    const raw = (units.glucose || "").toLowerCase();
+    if (raw === "mmol" || raw === "mmol/l" || raw === "mmol/litre") {
+      return "mmol/L";
+    }
+    return "mg/dL";
+  }
+
+  MW.glucoseUnit = MW.glucoseUnit || glucoseUnit;
+
+  // Settings change subscription (for Settings tab to notify others)
+  const _settingsSubscribers = MW._settingsSubscribers || new Set();
+
+  function onSettingsChange(cb) {
+    if (typeof cb !== "function") return () => {};
+    _settingsSubscribers.add(cb);
+    return function unsubscribe() {
+      _settingsSubscribers.delete(cb);
+    };
+  }
+
+  function _emitSettingsChanged() {
+    const current = getSettingsSafe();
+    _settingsSubscribers.forEach(fn => {
+      try { fn(current); } catch (e) { console.warn("onSettingsChange callback error", e); }
+    });
+  }
+
+  MW.onSettingsChange = MW.onSettingsChange || onSettingsChange;
+  MW._emitSettingsChanged = MW._emitSettingsChanged || _emitSettingsChanged;
+  MW._settingsSubscribers = _settingsSubscribers;
+
   // -----------------------------
   // Profile + VO2 helpers
   // -----------------------------
@@ -39,7 +102,7 @@
 
     let age = null;
     let sex = null;
-    let trainingLevel = null;
+    let trainingLevel = null; // sedentary | recreational | trained
 
     if (typeof p.age === "number" && p.age > 0 && p.age < 120) {
       age = p.age;
@@ -77,6 +140,7 @@
       else if (legacyTL.includes("high") || legacyTL.includes("train")) trainingLevel = "trained";
     }
 
+    // Sensible defaults to avoid "null profile" everywhere
     return {
       age: age || 45,
       sex: sex || "female",
@@ -87,6 +151,7 @@
   MW.getProfile = MW.getProfile || getProfile;
 
   function resolveProfileForVo2() {
+    // For now VO2 uses the same profile fields directly
     return getProfile();
   }
 
@@ -200,12 +265,20 @@
 
   MW.getApiBaseUrlLocal = MW.getApiBaseUrlLocal || getApiBaseUrlLocal;
 
-  let _snapshotCache = null;
-  let _snapshotCacheTs = 0;
+  // Stable alias for other tabs / future use
+  function getApiBaseUrl() {
+    return getApiBaseUrlLocal();
+  }
+
+  MW.getApiBaseUrl = MW.getApiBaseUrl || getApiBaseUrl;
+
+  let _snapshotCache = MW._snapshotCache || null;
+  let _snapshotCacheTs = MW._snapshotCacheTs || 0;
 
   async function getSnapshots(limit) {
     const n = typeof limit === "number" && limit > 0 ? limit : 7;
 
+    // Allow an override hook (e.g., native/GoodBarber integration)
     if (typeof window.getSnapshots === "function") {
       try {
         const r = await window.getSnapshots(n);
@@ -232,30 +305,43 @@
     _snapshotCache = list;
     _snapshotCacheTs = Date.now();
 
+    MW._snapshotCache = _snapshotCache;
+    MW._snapshotCacheTs = _snapshotCacheTs;
+
     return list;
   }
 
   MW.getSnapshots = MW.getSnapshots || getSnapshots;
 
+  // Stable alias name for GoodBarber tabs
+  async function fetchDailySnapshots(limit) {
+    return getSnapshots(limit);
+  }
+
+  MW.fetchDailySnapshots = MW.fetchDailySnapshots || fetchDailySnapshots;
+
   // -----------------------------
-  // Readiness scoring
+  // Readiness scoring (single snapshot)
   // -----------------------------
   function computeReadinessScore(snapshot) {
     if (!snapshot || typeof snapshot !== "object") return null;
     const s = snapshot;
 
+    // Sleep adherence
     let sleepScore = 70;
     if (s.sleep && s.sleep.totalMinutes && s.sleep.goalMinutes) {
       const pct = (s.sleep.totalMinutes / s.sleep.goalMinutes) * 100;
       sleepScore = Math.max(0, Math.min(100, pct));
     }
 
+    // HRV (relative to a generic 60ms)
     let hrvScore = 70;
     if (typeof s.hrv === "number" && s.hrv > 0) {
       const pct = (s.hrv / 60) * 100;
       hrvScore = Math.max(0, Math.min(100, pct));
     }
 
+    // Resting HR (lower is generally better)
     let rhrScore = 70;
     if (typeof s.restingHR === "number") {
       const r = s.restingHR;
@@ -267,6 +353,7 @@
       rhrScore = Math.max(0, Math.min(100, rhrScore));
     }
 
+    // Steps vs 8000 target
     let stepScore = 60;
     if (typeof s.steps === "number") {
       const pct = (s.steps / 8000) * 100;
@@ -286,8 +373,163 @@
   MW.computeReadinessScore = MW.computeReadinessScore || computeReadinessScore;
 
   // -----------------------------
-  // Export
+  // Readiness from a series of snapshots
   // -----------------------------
+  function computeReadinessFromSnapshots(snaps) {
+    const sorted = sortByDateAsc(snaps || []);
+    if (!sorted.length) {
+      return {
+        readinessScore: 50,
+        state: "easy",
+        reasons: ["Limited recent data – taking a neutral starting point."],
+        hrvToday: null,
+        rhrToday: null,
+        stepsAvg: null,
+        vo2: null,
+        vo2Info: null
+      };
+    }
+
+    const today = sorted[sorted.length - 1];
+    const past = sorted.slice(0, -1);
+
+    // Sleep adherence (multi-day)
+    const sleepRatios = sorted
+      .map(s => {
+        const sl = s.sleep || {};
+        const t = typeof sl.totalMinutes === "number" ? sl.totalMinutes : null;
+        const g = typeof sl.goalMinutes === "number" ? sl.goalMinutes : null;
+        if (!t || !g || g <= 0) return null;
+        return Math.min(1.2, t / g); // cap
+      })
+      .filter(v => v != null);
+
+    const sleepAdherenceAvg = sleepRatios.length ? avg(sleepRatios) : null;
+
+    // HRV baseline vs today
+    const hrvToday = typeof today.hrv === "number" ? today.hrv : null;
+    const hrvBaseline = past.length
+      ? avg(past.map(p => (typeof p.hrv === "number" ? p.hrv : null)))
+      : null;
+
+    // Resting HR baseline vs today
+    const rhrToday = typeof today.restingHR === "number" ? today.restingHR : null;
+    const rhrBaseline = past.length
+      ? avg(past.map(p => (typeof p.restingHR === "number" ? p.restingHR : null)))
+      : null;
+
+    // Steps average
+    const stepsAvg = avg(sorted.map(s => (typeof s.steps === "number" ? s.steps : null)));
+
+    // VO2 from latest day
+    const vo2 = typeof today.vo2Max === "number" ? today.vo2Max : null;
+    const vo2Info = vo2 != null ? classifyVo2(vo2, resolveProfileForVo2()) : null;
+
+    let score = 100;
+    const reasons = [];
+
+    // Sleep
+    if (sleepAdherenceAvg != null) {
+      if (sleepAdherenceAvg >= 1.0) {
+        reasons.push("Sleep has been on target or slightly above your goal.");
+      } else if (sleepAdherenceAvg >= 0.8) {
+        score -= 10;
+        reasons.push("Sleep has been slightly below your goal recently.");
+      } else if (sleepAdherenceAvg >= 0.6) {
+        score -= 20;
+        reasons.push("Sleep has been consistently below goal, which can reduce recovery.");
+      } else {
+        score -= 30;
+        reasons.push("Significant sleep debt over the last week.");
+      }
+    } else {
+      reasons.push("Not enough consistent sleep data to calibrate readiness from sleep.");
+      score -= 5;
+    }
+
+    // HRV
+    if (hrvBaseline != null && hrvToday != null && hrvBaseline > 0) {
+      const hrvDeltaPct = (hrvToday - hrvBaseline) / hrvBaseline;
+      if (hrvDeltaPct >= 0.1) {
+        reasons.push("HRV is above your recent baseline – good recovery signal.");
+      } else if (hrvDeltaPct >= 0) {
+        score -= 5;
+        reasons.push("HRV is near baseline – neutral recovery signal.");
+      } else if (hrvDeltaPct >= -0.2) {
+        score -= 15;
+        reasons.push("HRV is slightly below baseline – recovery may be incomplete.");
+      } else {
+        score -= 25;
+        reasons.push("HRV is well below baseline – body may need more recovery.");
+      }
+    } else {
+      reasons.push("HRV data is limited; using other metrics more heavily.");
+      score -= 5;
+    }
+
+    // Resting HR
+    if (rhrBaseline != null && rhrToday != null) {
+      const delta = rhrToday - rhrBaseline;
+      if (delta <= 1) {
+        reasons.push("Resting heart rate is stable vs your recent baseline.");
+      } else if (delta <= 5) {
+        score -= 10;
+        reasons.push("Resting heart rate is mildly elevated vs baseline.");
+      } else if (delta <= 10) {
+        score -= 20;
+        reasons.push("Resting heart rate is noticeably elevated – suggests strain or stress.");
+      } else {
+        score -= 30;
+        reasons.push("Resting heart rate is significantly elevated – strong sign to ease off.");
+      }
+    } else {
+      reasons.push("Limited resting heart rate data, relying more on other signals.");
+      score -= 5;
+    }
+
+    // Steps / activity
+    if (stepsAvg != null) {
+      if (stepsAvg >= 8000) {
+        reasons.push("Activity volume has been solid over the last week.");
+      } else if (stepsAvg >= 5000) {
+        score -= 5;
+        reasons.push("Activity volume is moderate – fine, but could be improved.");
+      } else if (stepsAvg >= 3000) {
+        score -= 10;
+        reasons.push("Activity has been on the low side recently.");
+      } else {
+        score -= 15;
+        reasons.push("Very low activity volume over the last week.");
+      }
+    } else {
+      reasons.push("No recent step data; cannot factor daily activity into readiness.");
+    }
+
+    score = clamp(Math.round(score), 0, 100);
+
+    let state = "easy";
+    if (score >= 75) state = "ready";
+    else if (score < 55) state = "rest";
+
+    return {
+      readinessScore: score,
+      state,
+      reasons,
+      hrvToday,
+      rhrToday,
+      stepsAvg,
+      vo2,
+      vo2Info
+    };
+  }
+
+  MW.computeReadinessFromSnapshots = MW.computeReadinessFromSnapshots || computeReadinessFromSnapshots;
+
+  // -----------------------------
+  // Version + export
+  // -----------------------------
+  MW.version = MW.version || "1.0.0";
+
   window.mwCore = MW;
 
 })();
