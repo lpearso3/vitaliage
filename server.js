@@ -2,7 +2,7 @@
 const express = require("express");
 const cors = require("cors");
 const { createClient } = require("@supabase/supabase-js");
-const path = require("path");               // 👈 NEW
+const path = require("path"); // 👈 already here
 require("dotenv").config();
 const { sendPush } = require("./apns");
 
@@ -11,11 +11,9 @@ app.set("trust proxy", 1);
 app.use(cors({ origin: "*", methods: ["GET", "POST", "OPTIONS"] }));
 app.use(express.json({ limit: "1mb" }));
 
-// 👇 NEW: static file hosting for dashboard build
-// Serve any general static assets from /public (optional but handy)
+// 👇 static file hosting for dashboard build
 app.use(express.static(path.join(__dirname, "public")));
 
-// Serve the React dashboard under /dashboard
 app.use(
   "/dashboard",
   express.static(path.join(__dirname, "public", "dashboard"))
@@ -296,7 +294,7 @@ app.post("/snapshot", async (req, res) => {
   }
 });
 
-// --- NEW: fetch daily snapshots for a user/date range ---
+// --- fetch daily snapshots for a user/date range ---
 app.get("/daily-snapshots", async (req, res) => {
   try {
     const { userId, from, to, limit } = req.query;
@@ -392,6 +390,147 @@ app.get("/daily-snapshots", async (req, res) => {
     return res
       .status(500)
       .json({ ok: false, error: "internal_error", detail: err.message });
+  }
+});
+
+// --- NEW: metric summary endpoint for charts / GoodBarber ---
+app.get("/metric-summary", async (req, res) => {
+  try {
+    const metric = String(req.query.metric || "").trim();
+    const windowDays = Math.min(
+      Math.max(parseInt(req.query.windowDays || "7", 10) || 7, 1),
+      30
+    );
+
+    if (!metric) {
+      return res.status(400).json({
+        ok: false,
+        error: "invalid_request",
+        message: "Missing 'metric' query parameter.",
+      });
+    }
+
+    // Map external metric keys → daily_snapshots columns/fields
+    const metricConfig = {
+      steps: { field: "steps", unit: "steps" },
+      vo2max: { field: "vo2_max", unit: "ml/kg/min" },
+      hrv: { field: "hrv", unit: "ms" },
+      resting_hr: { field: "resting_hr", unit: "bpm" },
+      sleep: {
+        getter: (row) => row.sleep_total_minutes ?? null,
+        unit: "minutes",
+      },
+      glucose: { field: "glucose_mg_dl", unit: "mg/dL" },
+      bp: {
+        getter: (row) => row.bp_systolic ?? null,
+        unit: "mmHg",
+      },
+      rr: { field: "respiratory_rate", unit: "breaths/min" },
+      adherence: {
+        getter: (row) => (row.raw_json && row.raw_json.adherence) ?? null,
+        unit: "score",
+      },
+      readiness: {
+        getter: (row) => (row.raw_json && row.raw_json.readiness) ?? null,
+        unit: "score",
+      },
+    };
+
+    const cfg = metricConfig[metric];
+    if (!cfg) {
+      return res.status(400).json({
+        ok: false,
+        error: "unsupported_metric",
+        message: `Unsupported metric '${metric}'.`,
+      });
+    }
+
+    // Date window based on snapshot_date (UTC)
+    const now = new Date();
+    const end = new Date(
+      Date.UTC(
+        now.getUTCFullYear(),
+        now.getUTCMonth(),
+        now.getUTCDate(),
+        23,
+        59,
+        59
+      )
+    );
+    const start = new Date(
+      end.getTime() - (windowDays - 1) * 24 * 60 * 60 * 1000
+    );
+
+    // more forgiving SELECT: pull all columns, JS ignores extras
+    const { data, error } = await supabase
+      .from("daily_snapshots")
+      .select("*")
+      .gte("snapshot_date", start.toISOString())
+      .lte("snapshot_date", end.toISOString())
+      .order("snapshot_date", { ascending: true });
+
+    if (error) {
+      console.error("Error querying daily_snapshots for /metric-summary:", error);
+      return res.status(500).json({
+        ok: false,
+        error: "server_error",
+        message: "Failed to load snapshots for metric summary.",
+      });
+    }
+
+    const rows = data || [];
+
+    const series = rows
+      .map((row) => {
+        let value = null;
+
+        if (typeof cfg.getter === "function") {
+          value = cfg.getter(row);
+        } else if (cfg.field) {
+          value = row[cfg.field];
+        }
+
+        if (value == null) return null;
+
+        const d = new Date(row.snapshot_date || row.date);
+        const dateStr = d.toISOString().slice(0, 10);
+
+        return {
+          date: dateStr,
+          value: Number(value),
+        };
+      })
+      .filter(Boolean);
+
+    // Basic trend detection
+    let trend = null;
+    if (series.length >= 2) {
+      const first = series[0].value;
+      const last = series[series.length - 1].value;
+      if (last > first * 1.05) trend = "improving";
+      else if (last < first * 0.95) trend = "worsening";
+      else trend = "stable";
+    }
+
+    return res.json({
+      ok: true,
+      metric,
+      windowDays,
+      series,
+      meta: {
+        unit: cfg.unit,
+        primarySource: null, // wire this later when we add source/device
+        sources: [],
+        trend,
+      },
+    });
+  } catch (err) {
+    console.error("Unexpected error in /metric-summary:", err);
+    return res.status(500).json({
+      ok: false,
+      error: "server_error",
+      message: "Unexpected error in metric-summary.",
+    });
   }
 });
 

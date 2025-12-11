@@ -1,0 +1,12 @@
+VITALIAGE-push-api/
+  node_modules/
+  public/
+  vitaliage-dashboard/
+  dist/
+  src/
+  .env
+  server.js
+  package.json
+  README.md
+  docs/                   ← CREATE THIS
+    api-contract.yaml     ← PASTE OPENAPI HERE
