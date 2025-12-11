@@ -319,6 +319,54 @@
 
   MW.fetchDailySnapshots = MW.fetchDailySnapshots || fetchDailySnapshots;
 
+  // ---- NEW: metric summary API helper (/metric-summary) ----
+  let _metricSummaryCache = MW._metricSummaryCache || {};
+  let _metricSummaryCacheTs = MW._metricSummaryCacheTs || 0;
+
+  /**
+   * Fetch metric summary from backend.
+   * metric: 'steps' | 'vo2max' | 'hrv' | 'resting_hr' | 'sleep' | 'glucose' | 'bp' | 'rr' | 'adherence' | 'readiness'
+   * windowDays: number of days (1–30, default 7)
+   */
+  async function fetchMetricSummary(metric, windowDays) {
+    const m = String(metric || "").trim();
+    const days = (typeof windowDays === "number" && windowDays > 0) ? windowDays : 7;
+    if (!m) throw new Error("metric is required");
+
+    const cacheKey = m + ":" + days;
+    const now = Date.now();
+
+    // 1 minute cache for metric summaries
+    if (_metricSummaryCache[cacheKey] && (now - _metricSummaryCacheTs) < 60000) {
+      return _metricSummaryCache[cacheKey];
+    }
+
+    const base = getApiBaseUrlLocal();
+    const url = base +
+      "/metric-summary?metric=" + encodeURIComponent(m) +
+      "&windowDays=" + encodeURIComponent(days);
+
+    const resp = await fetch(url, { headers: { "Accept": "application/json" } });
+    if (!resp.ok) {
+      throw new Error("Failed to fetch metric summary: " + resp.status);
+    }
+
+    const json = await resp.json();
+    if (!json || json.ok === false) {
+      throw new Error(json && json.message ? json.message : "Metric summary error");
+    }
+
+    _metricSummaryCache[cacheKey] = json;
+    _metricSummaryCacheTs = Date.now();
+
+    MW._metricSummaryCache = _metricSummaryCache;
+    MW._metricSummaryCacheTs = _metricSummaryCacheTs;
+
+    return json;
+  }
+
+  MW.fetchMetricSummary = MW.fetchMetricSummary || fetchMetricSummary;
+
   // -----------------------------
   // Readiness scoring (single snapshot)
   // -----------------------------
@@ -374,31 +422,6 @@
   // -----------------------------
   // Readiness from a series of snapshots (new canonical helper)
   // -----------------------------
-  /**
-   * Compute readiness from a series of daily snapshots.
-   *
-   * @param {Array<Object>} snapshots - most recent first or last (order agnostic, we sort)
-   * @param {Object} [profileOverride] - optional { age, sex, trainingLevel } (reserved for future use)
-   * @returns {{
-   *   score: number,
-   *   state: 'ready' | 'easy' | 'rest',
-   *   reasons: string[],
-   *   components: {
-   *     sleepScore: number,
-   *     hrvScore: number,
-   *     rhrScore: number,
-   *     stepsScore: number,
-   *     sleep7DayAdherence: number | null,
-   *     nightsMeetingGoal: number | null,
-   *     hrvDeltaPct: number | null,
-   *     rhrDelta: number | null,
-   *     stepsAvg: number | null
-   *   },
-   *   // backward-compat convenience fields:
-   *   readinessScore: number,
-   *   stepsAvg: number | null
-   * }}
-   */
   function computeReadinessFromSnapshots(snapshots, profileOverride) {
     if (!Array.isArray(snapshots) || snapshots.length === 0) {
       return {
@@ -446,16 +469,15 @@
     });
 
     const sleep7DayAdherence = (sleepGoalMinutesSum > 0)
-      ? (sleepMinutesSum / sleepGoalMinutesSum) // ratio
+      ? (sleepMinutesSum / sleepGoalMinutesSum)
       : null;
 
     // Sleep score: 0–100
     let sleepScore = 50;
     if (sleep7DayAdherence != null) {
-      const ratio = Math.min(sleep7DayAdherence, 1.2); // cap slight overage
+      const ratio = Math.min(sleep7DayAdherence, 1.2);
       sleepScore = Math.round(Math.max(0, Math.min(100, ratio * 100)));
       if (sleepScore < 50 && nightsMeetingGoal >= 4) {
-        // If they hit goal most nights but minutes ratio is off a bit, soften penalty
         sleepScore = Math.max(sleepScore, 60);
       }
     }
@@ -475,7 +497,6 @@
 
     if (hrvToday != null && hrvAvg && hrvAvg > 0) {
       hrvDeltaPct = ((hrvToday - hrvAvg) / hrvAvg) * 100;
-      // +20% or more => 100, -20% => ~0
       const raw = 50 + (hrvDeltaPct / 20) * 50;
       hrvScore = Math.round(Math.max(0, Math.min(100, raw)));
     }
@@ -495,12 +516,10 @@
 
     if (rhrToday != null && rhrAvg != null) {
       rhrDelta = rhrToday - rhrAvg; // + is worse
-      // +15 bpm => 0, -10 bpm => 100
       let raw;
       if (rhrDelta >= 15) raw = 0;
       else if (rhrDelta <= -10) raw = 100;
       else {
-        // interpolate between +15 -> 0, -10 -> 100
         const range = 25; // from -10 to +15
         const pos = (15 - rhrDelta) / range; // 0–1
         raw = pos * 100;
@@ -519,11 +538,10 @@
 
     let stepsScore = 50;
     if (stepsAvg != null) {
-      // 3k => 40, 7k => 70, 10k => 100, simple clamp
       if (stepsAvg <= 3000) stepsScore = 40;
       else if (stepsAvg >= 10000) stepsScore = 100;
       else {
-        const t = (stepsAvg - 3000) / 7000; // 0–1 between 3k and 10k
+        const t = (stepsAvg - 3000) / 7000;
         stepsScore = Math.round(40 + t * 60);
       }
     }
@@ -567,7 +585,6 @@
     if (finalScore >= 70) state = 'ready';
     else if (finalScore <= 40) state = 'rest';
 
-    // ---- Reasons (short text bullets) ----
     const reasons = [];
 
     if (sleep7DayAdherence != null) {
@@ -610,7 +627,6 @@
         rhrDelta,
         stepsAvg
       },
-      // convenience / backward-compat:
       readinessScore: finalScore,
       stepsAvg
     };
@@ -622,6 +638,7 @@
   // Version + export
   // -----------------------------
   MW.version = MW.version || "1.1.0";
+
   // -----------------------------
   // Global aliases for backward compatibility
   // -----------------------------
@@ -637,8 +654,8 @@
 
   window.getApiBaseUrl        = window.getApiBaseUrl        || getApiBaseUrl;
   window.fetchDailySnapshots  = window.fetchDailySnapshots  || fetchDailySnapshots;
+  window.fetchMetricSummary   = window.fetchMetricSummary   || fetchMetricSummary;
 
-  // Optional, if you ever want direct access:
   window.computeReadinessFromSnapshots =
     window.computeReadinessFromSnapshots || computeReadinessFromSnapshots;
 
