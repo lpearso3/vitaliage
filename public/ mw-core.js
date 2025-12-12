@@ -211,7 +211,7 @@
     if (vo2 == null || isNaN(vo2)) {
       return {
         band: "unknown",
-        comment: "We do not have enough VO₂ max data yet.",
+        comment: "We do not have enough VO2 max data yet.",
         ref: null,
         diff: null,
       };
@@ -230,13 +230,13 @@
 
     let comment;
     if (band === "low") {
-      comment = "Below expected for your age and sex—building aerobic fitness will help.";
+      comment = "Below expected for your age and sex, building aerobic fitness will help.";
     } else if (band === "below-average") {
-      comment = "Slightly below expected—regular moderate cardio can improve this.";
+      comment = "Slightly below expected, regular moderate cardio can improve this.";
     } else if (band === "average") {
-      comment = "Right around expected—keep up your routine.";
+      comment = "Right around expected, keep up your routine.";
     } else if (band === "above-average") {
-      comment = "Above expected—excellent aerobic base.";
+      comment = "Above expected, excellent aerobic base.";
     } else {
       comment = "Elite-level aerobic fitness.";
     }
@@ -278,7 +278,7 @@
     const n = typeof limit === "number" && limit > 0 ? limit : 7;
 
     // Allow an override hook (e.g., native/GoodBarber integration)
-    if (typeof window.getSnapshots === "function") {
+    if (typeof window.getSnapshots === "function" && window.getSnapshots !== getSnapshots) {
       try {
         const r = await window.getSnapshots(n);
         if (Array.isArray(r)) return r;
@@ -319,7 +319,7 @@
 
   MW.fetchDailySnapshots = MW.fetchDailySnapshots || fetchDailySnapshots;
 
-  // ---- NEW: metric summary API helper (/metric-summary) ----
+  // ---- metric summary API helper (/metric-summary) ----
   let _metricSummaryCache = MW._metricSummaryCache || {};
   let _metricSummaryCacheTs = MW._metricSummaryCacheTs || 0;
 
@@ -656,8 +656,17 @@
   window.fetchDailySnapshots  = window.fetchDailySnapshots  || fetchDailySnapshots;
   window.fetchMetricSummary   = window.fetchMetricSummary   || fetchMetricSummary;
 
+  // Helpful extra globals for tabs
+  window.getSnapshots         = window.getSnapshots         || getSnapshots;
+  window.computeReadinessScore =
+    window.computeReadinessScore || computeReadinessScore;
   window.computeReadinessFromSnapshots =
     window.computeReadinessFromSnapshots || computeReadinessFromSnapshots;
+
+  // Settings events as globals if needed
+  window.onSettingsChange     = window.onSettingsChange     || onSettingsChange;
+  window.mwEmitSettingsChanged =
+    window.mwEmitSettingsChanged || _emitSettingsChanged;
 
   window.mwCore = MW;
 
