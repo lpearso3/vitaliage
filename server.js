@@ -1154,6 +1154,73 @@ app.get("/metric-summary", async (req, res) => {
     });
   }
 });
+// =======================================================
+// Anchors: get latest in-clinic anchor records (read-only)
+// GET /anchors/latest?userId=<uuid optional>
+// Returns latest: conneqt, tanita, grip, rmr
+// =======================================================
+app.get("/anchors/latest", async (req, res) => {
+  try {
+    const { userId } = req.query;
+    const cleanUserId = userId && uuidRegex.test(String(userId)) ? String(userId) : null;
+
+    async function latestFrom(table, selectCols) {
+      let q = supabase.from(table).select(selectCols).order("measured_at", { ascending: false }).limit(1);
+      if (cleanUserId) q = q.eq("user_id", cleanUserId);
+      const { data, error } = await q;
+      if (error) return { ok: false, error: error.message || error.code, row: null };
+      return { ok: true, row: data?.[0] || null };
+    }
+
+    // Each query is independent; missing tables won't break the whole response.
+    const [conneqt, tanita, grip, rmr] = await Promise.all([
+      latestFrom(
+        "conneqt_assessments",
+        "id,user_id,measured_at,day_key,quality,device,operator,conditions,brachial_systolic,brachial_diastolic,central_systolic,central_diastolic,heart_rate,augmentation_index,augmentation_pressure,pulse_pressure_amplification,sevr,central_pulse_pressure,arterial_age,report_pdf_url"
+      ),
+      latestFrom(
+        "tanita_assessments",
+        "id,user_id,measured_at,day_key,quality,device,operator,conditions,weight_kg,body_fat_pct,fat_mass_kg,fat_free_mass_kg,muscle_mass_kg,tbw_pct,tbw_kg,visceral_fat_rating,bmr_kcal,metabolic_age"
+      ),
+      latestFrom(
+        "grip_strength_assessments",
+        "id,user_id,measured_at,day_key,quality,device,operator,conditions,unit,left_best,right_best,notes"
+      ),
+      latestFrom(
+        "rmr_assessments",
+        "id,user_id,measured_at,day_key,quality,device,operator,conditions,rmr_kcal_day,vo2_ml_min,vco2_ml_min,rer,steady_state_minutes,protocol,notes"
+      ),
+    ]);
+
+    // If a table doesn't exist yet, Supabase often returns an error.
+    // We will still return ok:true overall, but include per-anchor status.
+    return res.json({
+      ok: true,
+      filter: { userId: cleanUserId }, // null means "global latest"
+      latest: {
+        conneqt: conneqt.row,
+        tanita: tanita.row,
+        grip: grip.row,
+        rmr: rmr.row,
+      },
+      status: {
+        conneqt: conneqt.ok ? "ok" : "error",
+        tanita: tanita.ok ? "ok" : "error",
+        grip: grip.ok ? "ok" : "error",
+        rmr: rmr.ok ? "ok" : "error",
+      },
+      errors: {
+        conneqt: conneqt.ok ? null : conneqt.error,
+        tanita: tanita.ok ? null : tanita.error,
+        grip: grip.ok ? null : grip.error,
+        rmr: rmr.ok ? null : rmr.error,
+      },
+    });
+  } catch (err) {
+    console.error("Error in GET /anchors/latest:", err);
+    return res.status(500).json({ ok: false, error: "internal_error", detail: err.message });
+  }
+});
 
 // --- Debug: list all registered routes ---
 function listRoutes() {
