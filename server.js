@@ -329,7 +329,7 @@ app.post("/office/measurements", async (req, res) => {
 
 // =======================================================
 // CONNEQT Pulse (Staff entry / in-clinic anchor)
-// Table: conneqt_assessments (you must create)
+// Table: conneqt_assessments
 // Field names match the machine display list.
 // =======================================================
 app.post("/office/conneqt", async (req, res) => {
@@ -463,6 +463,7 @@ app.post("/office/conneqt", async (req, res) => {
       .json({ ok: false, error: "internal_error", detail: err.message });
   }
 });
+
 // =======================================================
 // Tanita MC-580 (Staff entry / in-clinic anchor)
 // Table: tanita_assessments
@@ -566,6 +567,7 @@ app.post("/office/tanita", async (req, res) => {
       .json({ ok: false, error: "internal_error", detail: err.message });
   }
 });
+
 // =======================================================
 // Jamar Grip Strength (Staff entry / in-clinic anchor)
 // Table: grip_strength_assessments
@@ -642,6 +644,7 @@ app.post("/office/grip", async (req, res) => {
     return res.status(500).json({ ok: false, error: "internal_error", detail: err.message });
   }
 });
+
 // =======================================================
 // KORR ReeVue RMR (Staff entry / in-clinic anchor)
 // Table: rmr_assessments
@@ -918,7 +921,10 @@ app.get("/daily-snapshots", async (req, res) => {
           }
         }
       } else if (cErr) {
-        console.warn("⚠️ conneqt_assessments query failed (table may not exist yet):", cErr.message || cErr.code);
+        console.warn(
+          "⚠️ conneqt_assessments query failed (table may not exist yet):",
+          cErr.message || cErr.code
+        );
       }
     } catch (e) {
       console.warn("⚠️ conneqt_assessments overlay skipped:", e?.message || String(e));
@@ -960,20 +966,29 @@ app.get("/daily-snapshots", async (req, res) => {
       const conneqt = dk ? conneqtByDay.get(dk) : null;
 
       // precedence: OFFICE > CONNEQT(brachial) > wearable
+      // (Clinic ALWAYS overrides wearable on that day if present.)
       if (office) {
         dto.bpSystolic = office.bp_systolic;
         dto.bpDiastolic = office.bp_diastolic;
 
         dto.raw = dto.raw || {};
         dto.raw._provenance = dto.raw._provenance || {};
-        dto.raw._provenance.bp = { source: "OFFICE", measuredAt: office.measured_at, quality: office.quality ?? null };
+        dto.raw._provenance.bp = {
+          source: "OFFICE",
+          measuredAt: office.measured_at,
+          quality: office.quality ?? null,
+        };
       } else if (conneqt) {
         dto.bpSystolic = conneqt.brachial_systolic;
         dto.bpDiastolic = conneqt.brachial_diastolic;
 
         dto.raw = dto.raw || {};
         dto.raw._provenance = dto.raw._provenance || {};
-        dto.raw._provenance.bp = { source: "CONNEQT", measuredAt: conneqt.measured_at, quality: conneqt.quality ?? null };
+        dto.raw._provenance.bp = {
+          source: "CONNEQT",
+          measuredAt: conneqt.measured_at,
+          quality: conneqt.quality ?? null,
+        };
       }
 
       return dto;
@@ -1030,7 +1045,9 @@ app.get("/metric-summary", async (req, res) => {
 
     // Date window based on snapshot_date (UTC)
     const now = new Date();
-    const end = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate(), 23, 59, 59));
+    const end = new Date(
+      Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate(), 23, 59, 59)
+    );
     const start = new Date(end.getTime() - (windowDays - 1) * 24 * 60 * 60 * 1000);
 
     const { data, error } = await supabase
@@ -1154,6 +1171,7 @@ app.get("/metric-summary", async (req, res) => {
     });
   }
 });
+
 // =======================================================
 // Anchors: get latest in-clinic anchor records (read-only)
 // GET /anchors/latest?userId=<uuid optional>
