@@ -1,5 +1,6 @@
 // services/resolvedBundle/buildResolvedBundle.js
 const crypto = require("crypto");
+const { buildDailySnapshotTrends } = require("./dailySnapshotTrends");
 
 /**
  * Deterministic JSON stringify with stable key ordering.
@@ -25,9 +26,14 @@ function sha256Hex(input) {
 
 /**
  * buildResolvedBundle({ supabase, userId, bundleDayKey, windowDays })
- * Returns the canonical ResolvedBundle shape with deterministic bundle_hash.
+ * Returns the canonical ResolvedBundle shape.
  *
- * v1: includes latest_anchors (conneqt, tanita, grip, rmr) using "latest wins".
+ * v1 baseline: includes latest_anchors (conneqt, tanita, grip, rmr) using "latest wins".
+ * Step 2: populates daily_snapshot_trends deterministically from immutable daily_snapshots only.
+ *
+ * Step 2 bundle_hash canon:
+ * - MUST change when: bundle_day_key, window_days, or any daily_snapshot in-window changes
+ * - MUST NOT include: anchors, interpretation, confidence, AI outputs
  */
 async function buildResolvedBundle({
   supabase,
@@ -42,6 +48,18 @@ async function buildResolvedBundle({
     throw new Error("supabase client is required");
   }
 
+  const window_days = Number(windowDays) || 28;
+
+  function subtractDays(dayKey, days) {
+    const [y, m, d] = dayKey.split("-").map(Number);
+    const dt = new Date(Date.UTC(y, m - 1, d));
+    dt.setUTCDate(dt.getUTCDate() - days);
+    const yy = dt.getUTCFullYear();
+    const mm = String(dt.getUTCMonth() + 1).padStart(2, "0");
+    const dd = String(dt.getUTCDate()).padStart(2, "0");
+    return `${yy}-${mm}-${dd}`;
+  }
+
   async function latestFrom(table, selectCols) {
     let q = supabase
       .from(table)
@@ -54,12 +72,42 @@ async function buildResolvedBundle({
 
     const { data, error } = await q;
     if (error) {
-      throw new Error(`latestFrom ${table} failed: ${error.message || error.code}`);
+      throw new Error(
+        `latestFrom ${table} failed: ${error.message || error.code}`
+      );
     }
     return data?.[0] || null;
   }
 
-  // Keep selects aligned with /anchors/latest, plus raw_json
+  // --- Step 2: daily_snapshots selection (locked rules) ---
+  const startExclusive = subtractDays(bundleDayKey, window_days);
+
+  let dsQuery = supabase
+    .from("daily_snapshots")
+    .select("*")
+    .lte("day_key", bundleDayKey)
+    .gt("day_key", startExclusive)
+    .order("day_key", { ascending: true });
+
+  if (userId) dsQuery = dsQuery.eq("user_id", userId);
+
+  const { data: dailySnapshots, error: dsError } = await dsQuery;
+  if (dsError) {
+    throw new Error(
+      `daily_snapshots window fetch failed: ${dsError.message || dsError.code}`
+    );
+  }
+
+  const snapshots = dailySnapshots || [];
+
+  const daily_snapshot_trends = buildDailySnapshotTrends({
+    snapshots,
+    bundleDayKey,
+    windowDays: window_days,
+  });
+  // --- end Step 2 ---
+
+  // Anchors (v1 baseline) — excluded from Step 2 trend calc and excluded from Step 2 hash
   const [conneqt, tanita, grip, rmr] = await Promise.all([
     latestFrom(
       "conneqt_assessments",
@@ -82,10 +130,15 @@ async function buildResolvedBundle({
   const baseBundle = {
     user_id: userId,
     bundle_day_key: bundleDayKey,
-    window_days: Number(windowDays) || 28,
+    window_days,
 
-    daily_snapshot_trends: {},
+    // Step 2 output (locked shape)
+    daily_snapshot_trends,
 
+    // Returning snapshots is allowed; authority is still the table; no mutation occurs
+    daily_snapshots: snapshots,
+
+    // v1 baseline anchors (explicitly excluded from Step 2 trend calc + hash)
     latest_anchors: {
       conneqt,
       tanita,
@@ -93,14 +146,35 @@ async function buildResolvedBundle({
       rmr,
     },
 
+    // Placeholders (unchanged)
     derived_metrics: {},
     confidence: {},
     flags: [],
     provenance_summary: {},
   };
 
-  const canonical = stableStringify(baseBundle);
-  const bundle_hash = sha256Hex(canonical);
+  // Step 2 canonical hash payload (anchors excluded)
+  const hashPayload = {
+    bundle_day_key: bundleDayKey,
+    window_days,
+    daily_snapshots: snapshots.map((s) => ({
+      id: s.id,
+      day_key: s.day_key,
+
+      // Step 2 metrics in-scope (nullable, vendor-agnostic)
+      resting_hr: s.resting_hr ?? null,
+      hrv: s.hrv ?? null,
+      sleep_duration: s.sleep_duration ?? null,
+      sleep_efficiency: s.sleep_efficiency ?? null,
+      steps: s.steps ?? null,
+      activity_minutes: s.activity_minutes ?? null,
+      respiratory_rate: s.respiratory_rate ?? null,
+      skin_temp_delta: s.skin_temp_delta ?? null,
+      blood_oxygen: s.blood_oxygen ?? null,
+    })),
+  };
+
+  const bundle_hash = sha256Hex(stableStringify(hashPayload));
 
   return { ...baseBundle, bundle_hash };
 }
