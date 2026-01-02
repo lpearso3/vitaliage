@@ -6,19 +6,12 @@ const path = require("path");
 require("dotenv").config();
 const { sendPush } = require("./apns");
 
+const { buildResolvedBundle } = require("./services/resolvedBundle/buildResolvedBundle");
+
 const app = express();
 app.set("trust proxy", 1);
 app.use(cors({ origin: "*", methods: ["GET", "POST", "OPTIONS"] }));
 app.use(express.json({ limit: "1mb" }));
-
-// 👇 static file hosting for dashboard build
-app.use(express.static(path.join(__dirname, "public")));
-app.use("/dashboard", express.static(path.join(__dirname, "public", "dashboard")));
-
-// SPA fallback for any /dashboard/* route
-app.get("/dashboard/*", (_req, res) => {
-  res.sendFile(path.join(__dirname, "public", "dashboard", "index.html"));
-});
 
 // --- Shared helpers / regex ---
 const uuidRegex =
@@ -40,7 +33,7 @@ function dayKeyUtc(isoOrDate) {
   return d.toISOString().slice(0, 10); // YYYY-MM-DD
 }
 
-// ✅ NEW: expand overlay windows to whole UTC days
+// expand overlay windows to whole UTC days
 function startOfDayUtc(isoOrDate) {
   const d = isoOrDate instanceof Date ? isoOrDate : new Date(isoOrDate);
   if (isNaN(d.getTime())) return null;
@@ -65,6 +58,36 @@ const supabase = createClient(
 // --- Health routes ---
 app.get("/", (_req, res) => res.send("Vitaliage Push API ✅"));
 app.get("/ping", (_req, res) => res.json({ ok: true }));
+
+// --- Resolved Bundle ---
+app.get("/resolved-bundle", async (req, res) => {
+  try {
+    const userId = req.query.userId ?? null;
+    const dayKey = req.query.dayKey;
+    const windowDays = req.query.windowDays ? Number(req.query.windowDays) : 28;
+
+    if (!dayKey) {
+      return res.status(400).json({
+        ok: false,
+        error: "Missing required query param: dayKey (YYYY-MM-DD)",
+      });
+    }
+
+    const bundle = await buildResolvedBundle({
+      supabase, // ✅ required so builder can fetch latest anchors
+      userId,
+      bundleDayKey: dayKey,
+      windowDays,
+    });
+
+    return res.json({ ok: true, bundle });
+  } catch (err) {
+    return res.status(400).json({
+      ok: false,
+      error: err.message || "Bad Request",
+    });
+  }
+});
 
 // --- DB connectivity check ---
 app.get("/db-check", async (_req, res) => {
@@ -172,7 +195,7 @@ app.post("/push", handleSend);
 app.post("/api/push", handleSend);
 app.post("/push/send", handleSend);
 
-// --- NEW: push to the most recent active device ---
+// --- push to the most recent active device ---
 app.post("/push-latest", async (req, res) => {
   try {
     const {
@@ -257,7 +280,7 @@ app.post("/push-latest", async (req, res) => {
 
 // =======================================================
 // OFFICE MEASUREMENTS (Staff entry)
-// Table: office_measurements (you already created)
+// Table: office_measurements
 // =======================================================
 app.post("/office/measurements", async (req, res) => {
   try {
@@ -336,7 +359,7 @@ app.post("/office/measurements", async (req, res) => {
       .limit(1);
 
     if (error) {
-      console.error("❌ Supabase insert error in /office/measurements:", error);
+      console.error("Supabase insert error in /office/measurements:", error);
       return res.status(500).json({
         ok: false,
         error: "db_insert_failed",
@@ -356,7 +379,6 @@ app.post("/office/measurements", async (req, res) => {
 // =======================================================
 // CONNEQT Pulse (Staff entry / in-clinic anchor)
 // Table: conneqt_assessments
-// Field names match the machine display list.
 // =======================================================
 app.post("/office/conneqt", async (req, res) => {
   try {
@@ -370,7 +392,6 @@ app.post("/office/conneqt", async (req, res) => {
       conditions,
       quality, // "high" | "medium" | "low"
 
-      // Machine fields (match display)
       brachialSystolic,
       brachialDiastolic,
 
@@ -379,11 +400,11 @@ app.post("/office/conneqt", async (req, res) => {
 
       heartRate,
 
-      augmentationIndex, // AIx
-      augmentationPressure, // AP
-      pulsePressureAmplification, // PPA
+      augmentationIndex,
+      augmentationPressure,
+      pulsePressureAmplification,
       sevr,
-      centralPulsePressure, // CPP
+      centralPulsePressure,
       arterialAge,
 
       reportPdfUrl,
@@ -474,7 +495,7 @@ app.post("/office/conneqt", async (req, res) => {
       .limit(1);
 
     if (error) {
-      console.error("❌ Supabase insert error in /office/conneqt:", error);
+      console.error("Supabase insert error in /office/conneqt:", error);
       return res.status(500).json({
         ok: false,
         error: "db_insert_failed",
@@ -507,7 +528,6 @@ app.post("/office/tanita", async (req, res) => {
       conditions,
       quality, // "high" | "medium" | "low"
 
-      // common fields
       weightKg,
       bodyFatPct,
       fatMassKg,
@@ -579,7 +599,7 @@ app.post("/office/tanita", async (req, res) => {
       .limit(1);
 
     if (error) {
-      console.error("❌ Supabase insert error in /office/tanita:", error);
+      console.error("Supabase insert error in /office/tanita:", error);
       return res.status(500).json({
         ok: false,
         error: "db_insert_failed",
@@ -615,8 +635,8 @@ app.post("/office/grip", async (req, res) => {
       unit = "kgf", // "kgf" | "lbs"
       leftBest,
       rightBest,
-      leftAttempts, // optional array
-      rightAttempts, // optional array
+      leftAttempts,
+      rightAttempts,
       notes,
     } = payload;
 
@@ -631,6 +651,7 @@ app.post("/office/grip", async (req, res) => {
       rightBest != null ||
       (Array.isArray(leftAttempts) && leftAttempts.length) ||
       (Array.isArray(rightAttempts) && rightAttempts.length);
+
     if (!hasAny) {
       return res.status(400).json({
         ok: false,
@@ -667,7 +688,7 @@ app.post("/office/grip", async (req, res) => {
       .limit(1);
 
     if (error) {
-      console.error("❌ Supabase insert error in /office/grip:", error);
+      console.error("Supabase insert error in /office/grip:", error);
       return res.status(500).json({
         ok: false,
         error: "db_insert_failed",
@@ -716,7 +737,9 @@ app.post("/office/rmr", async (req, res) => {
     if (!dk)
       return res.status(400).json({ ok: false, error: "invalid_measuredAt" });
 
-    const hasAny = rmrKcalDay != null || vo2MlMin != null || vco2MlMin != null || rer != null;
+    const hasAny =
+      rmrKcalDay != null || vo2MlMin != null || vco2MlMin != null || rer != null;
+
     if (!hasAny) {
       return res.status(400).json({
         ok: false,
@@ -754,7 +777,7 @@ app.post("/office/rmr", async (req, res) => {
       .limit(1);
 
     if (error) {
-      console.error("❌ Supabase insert error in /office/rmr:", error);
+      console.error("Supabase insert error in /office/rmr:", error);
       return res.status(500).json({
         ok: false,
         error: "db_insert_failed",
@@ -825,7 +848,7 @@ app.post("/snapshot", async (req, res) => {
     const { error } = await supabase.from("daily_snapshots").insert(row);
 
     if (error) {
-      console.error("❌ Supabase insert error in /snapshot:", error);
+      console.error("Supabase insert error in /snapshot:", error);
       return res.status(500).json({
         ok: false,
         error: "db_insert_failed",
@@ -888,7 +911,7 @@ app.get("/daily-snapshots", async (req, res) => {
     const { data, error } = await query;
 
     if (error) {
-      console.error("❌ Supabase error in GET /daily-snapshots:", error);
+      console.error("Supabase error in GET /daily-snapshots:", error);
       return res.status(500).json({
         ok: false,
         error: "db_query_failed",
@@ -911,7 +934,7 @@ app.get("/daily-snapshots", async (req, res) => {
       if (!rangeTo && dates.length) rangeTo = dates[dates.length - 1];
     }
 
-    // ✅ NEW: Expand overlay window to whole days so same-day clinic measurements later in the day are included
+    // expand overlay window to whole days so same-day clinic measurements later in the day are included
     if (rangeFrom) rangeFrom = startOfDayUtc(rangeFrom);
     if (rangeTo) rangeTo = endOfDayUtc(rangeTo);
 
@@ -943,13 +966,13 @@ app.get("/daily-snapshots", async (req, res) => {
         }
       } else if (officeErr) {
         console.warn(
-          "⚠️ office_measurements query failed:",
+          "office_measurements query failed:",
           officeErr.message || officeErr.code
         );
       }
     } catch (e) {
       console.warn(
-        "⚠️ office_measurements overlay skipped:",
+        "office_measurements overlay skipped:",
         e?.message || String(e)
       );
     }
@@ -984,13 +1007,13 @@ app.get("/daily-snapshots", async (req, res) => {
         }
       } else if (cErr) {
         console.warn(
-          "⚠️ conneqt_assessments query failed (table may not exist yet):",
+          "conneqt_assessments query failed:",
           cErr.message || cErr.code
         );
       }
     } catch (e) {
       console.warn(
-        "⚠️ conneqt_assessments overlay skipped:",
+        "conneqt_assessments overlay skipped:",
         e?.message || String(e)
       );
     }
@@ -1030,8 +1053,6 @@ app.get("/daily-snapshots", async (req, res) => {
       const office = dk ? officeByDay.get(dk) : null;
       const conneqt = dk ? conneqtByDay.get(dk) : null;
 
-      // precedence: OFFICE > CONNEQT(brachial) > wearable
-      // (Clinic ALWAYS overrides wearable on that day if present.)
       if (office) {
         dto.bpSystolic = office.bp_systolic;
         dto.bpDiastolic = office.bp_diastolic;
@@ -1085,13 +1106,15 @@ app.get("/metric-summary", async (req, res) => {
       });
     }
 
-    // Map external metric keys → daily_snapshots columns/fields
     const metricConfig = {
       steps: { field: "steps", unit: "steps" },
       vo2max: { field: "vo2_max", unit: "ml/kg/min" },
       hrv: { field: "hrv", unit: "ms" },
       resting_hr: { field: "resting_hr", unit: "bpm" },
-      sleep: { getter: (row) => row.sleep_total_minutes ?? null, unit: "minutes" },
+      sleep: {
+        getter: (row) => row.sleep_total_minutes ?? null,
+        unit: "minutes",
+      },
       glucose: { field: "glucose_mg_dl", unit: "mg/dL" },
       bp: { getter: (row) => row.bp_systolic ?? null, unit: "mmHg" },
       rr: { field: "respiratory_rate", unit: "breaths/min" },
@@ -1114,12 +1137,20 @@ app.get("/metric-summary", async (req, res) => {
       });
     }
 
-    // Date window based on snapshot_date (UTC)
     const now = new Date();
     const end = new Date(
-      Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate(), 23, 59, 59)
+      Date.UTC(
+        now.getUTCFullYear(),
+        now.getUTCMonth(),
+        now.getUTCDate(),
+        23,
+        59,
+        59
+      )
     );
-    const start = new Date(end.getTime() - (windowDays - 1) * 24 * 60 * 60 * 1000);
+    const start = new Date(
+      end.getTime() - (windowDays - 1) * 24 * 60 * 60 * 1000
+    );
 
     const { data, error } = await supabase
       .from("daily_snapshots")
@@ -1139,7 +1170,6 @@ app.get("/metric-summary", async (req, res) => {
 
     const rows = data || [];
 
-    // For bp: overlay OFFICE > CONNEQT(brachial) > wearable by day
     let officeByDay = new Map();
     let conneqtByDay = new Map();
 
@@ -1219,7 +1249,6 @@ app.get("/metric-summary", async (req, res) => {
       })
       .filter(Boolean);
 
-    // Basic trend detection
     let trend = null;
     if (series.length >= 2) {
       const first = series[0].value;
@@ -1254,7 +1283,6 @@ app.get("/metric-summary", async (req, res) => {
 // =======================================================
 // Anchors: get latest in-clinic anchor records (read-only)
 // GET /anchors/latest?userId=<uuid optional>
-// Returns latest: conneqt, tanita, grip, rmr
 // =======================================================
 app.get("/anchors/latest", async (req, res) => {
   try {
@@ -1295,7 +1323,7 @@ app.get("/anchors/latest", async (req, res) => {
 
     return res.json({
       ok: true,
-      filter: { userId: cleanUserId }, // null means "global latest"
+      filter: { userId: cleanUserId },
       latest: {
         conneqt: conneqt.row,
         tanita: tanita.row,
@@ -1325,6 +1353,15 @@ app.get("/anchors/latest", async (req, res) => {
   }
 });
 
+// -------------------------------------------------------
+// STATIC + DASHBOARD SPA (MUST BE AFTER API ROUTES)
+// -------------------------------------------------------
+app.use(express.static(path.join(__dirname, "public")));
+app.use("/dashboard", express.static(path.join(__dirname, "public", "dashboard")));
+app.get(/^\/dashboard(\/.*)?$/, (_req, res) => {
+  res.sendFile(path.join(__dirname, "public", "dashboard", "index.html"));
+});
+
 // --- Debug: list all registered routes ---
 function listRoutes() {
   const out = [];
@@ -1338,7 +1375,6 @@ function listRoutes() {
   });
   return out;
 }
-
 app.get("/__routes", (_req, res) => res.json(listRoutes()));
 
 // --- Start server ---
@@ -1346,4 +1382,5 @@ const PORT = process.env.PORT || 3001;
 app.listen(PORT, () => {
   console.log(`✅ Server running on http://localhost:${PORT}`);
 });
+
 
