@@ -40,6 +40,22 @@ function dayKeyUtc(isoOrDate) {
   return d.toISOString().slice(0, 10); // YYYY-MM-DD
 }
 
+// ✅ NEW: expand overlay windows to whole UTC days
+function startOfDayUtc(isoOrDate) {
+  const d = isoOrDate instanceof Date ? isoOrDate : new Date(isoOrDate);
+  if (isNaN(d.getTime())) return null;
+  return new Date(
+    Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate(), 0, 0, 0)
+  ).toISOString();
+}
+function endOfDayUtc(isoOrDate) {
+  const d = isoOrDate instanceof Date ? isoOrDate : new Date(isoOrDate);
+  if (isNaN(d.getTime())) return null;
+  return new Date(
+    Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate(), 23, 59, 59)
+  ).toISOString();
+}
+
 // --- Supabase client ---
 const supabase = createClient(
   process.env.SUPABASE_URL,
@@ -125,7 +141,8 @@ async function handleSend(req, res) {
     pushType, // optional: 'alert' | 'background'
   } = req.body || {};
 
-  if (!token) return res.status(400).json({ ok: false, error: "Missing 'token'" });
+  if (!token)
+    return res.status(400).json({ ok: false, error: "Missing 'token'" });
 
   const effectivePushType = pushType || (silent ? "background" : "alert");
 
@@ -145,7 +162,9 @@ async function handleSend(req, res) {
     });
   } catch (err) {
     console.error("APNs send error:", err);
-    return res.status(500).json({ ok: false, error: err.message || String(err) });
+    return res
+      .status(500)
+      .json({ ok: false, error: err.message || String(err) });
   }
 }
 
@@ -185,9 +204,11 @@ app.post("/push-latest", async (req, res) => {
 
     if (error) {
       console.error("Supabase error in /push-latest:", error);
-      return res
-        .status(500)
-        .json({ ok: false, error: "Supabase query failed", detail: error.message });
+      return res.status(500).json({
+        ok: false,
+        error: "Supabase query failed",
+        detail: error.message,
+      });
     }
 
     if (!rows || rows.length === 0) {
@@ -226,9 +247,11 @@ app.post("/push-latest", async (req, res) => {
     });
   } catch (err) {
     console.error("Error in /push-latest:", err);
-    return res
-      .status(500)
-      .json({ ok: false, error: "Internal server error", detail: err.message });
+    return res.status(500).json({
+      ok: false,
+      error: "Internal server error",
+      detail: err.message,
+    });
   }
 });
 
@@ -256,7 +279,8 @@ app.post("/office/measurements", async (req, res) => {
 
     const tsIso = toIsoOrNull(measuredAt) || new Date().toISOString();
     const dk = dayKeyUtc(tsIso);
-    if (!dk) return res.status(400).json({ ok: false, error: "invalid_measuredAt" });
+    if (!dk)
+      return res.status(400).json({ ok: false, error: "invalid_measuredAt" });
 
     const hasAny =
       bpSystolic != null ||
@@ -306,7 +330,9 @@ app.post("/office/measurements", async (req, res) => {
     const { data, error } = await supabase
       .from("office_measurements")
       .insert(row)
-      .select("id,user_id,measured_at,day_key,bp_systolic,bp_diastolic,quality,device,operator")
+      .select(
+        "id,user_id,measured_at,day_key,bp_systolic,bp_diastolic,quality,device,operator"
+      )
       .limit(1);
 
     if (error) {
@@ -367,7 +393,8 @@ app.post("/office/conneqt", async (req, res) => {
 
     const tsIso = toIsoOrNull(measuredAt) || new Date().toISOString();
     const dk = dayKeyUtc(tsIso);
-    if (!dk) return res.status(400).json({ ok: false, error: "invalid_measuredAt" });
+    if (!dk)
+      return res.status(400).json({ ok: false, error: "invalid_measuredAt" });
 
     const hasAny =
       brachialSystolic != null ||
@@ -497,7 +524,8 @@ app.post("/office/tanita", async (req, res) => {
 
     const tsIso = toIsoOrNull(measuredAt) || new Date().toISOString();
     const dk = dayKeyUtc(tsIso);
-    if (!dk) return res.status(400).json({ ok: false, error: "invalid_measuredAt" });
+    if (!dk)
+      return res.status(400).json({ ok: false, error: "invalid_measuredAt" });
 
     const hasAny =
       weightKg != null ||
@@ -587,7 +615,7 @@ app.post("/office/grip", async (req, res) => {
       unit = "kgf", // "kgf" | "lbs"
       leftBest,
       rightBest,
-      leftAttempts,  // optional array
+      leftAttempts, // optional array
       rightAttempts, // optional array
       notes,
     } = payload;
@@ -595,9 +623,14 @@ app.post("/office/grip", async (req, res) => {
     const cleanUserId = uuidRegex.test(userId || "") ? userId : null;
     const tsIso = toIsoOrNull(measuredAt) || new Date().toISOString();
     const dk = dayKeyUtc(tsIso);
-    if (!dk) return res.status(400).json({ ok: false, error: "invalid_measuredAt" });
+    if (!dk)
+      return res.status(400).json({ ok: false, error: "invalid_measuredAt" });
 
-    const hasAny = leftBest != null || rightBest != null || (Array.isArray(leftAttempts) && leftAttempts.length) || (Array.isArray(rightAttempts) && rightAttempts.length);
+    const hasAny =
+      leftBest != null ||
+      rightBest != null ||
+      (Array.isArray(leftAttempts) && leftAttempts.length) ||
+      (Array.isArray(rightAttempts) && rightAttempts.length);
     if (!hasAny) {
       return res.status(400).json({
         ok: false,
@@ -635,13 +668,19 @@ app.post("/office/grip", async (req, res) => {
 
     if (error) {
       console.error("❌ Supabase insert error in /office/grip:", error);
-      return res.status(500).json({ ok: false, error: "db_insert_failed", detail: error.message || error.code });
+      return res.status(500).json({
+        ok: false,
+        error: "db_insert_failed",
+        detail: error.message || error.code,
+      });
     }
 
     return res.status(200).json({ ok: true, assessment: data?.[0] || null });
   } catch (err) {
     console.error("Error in POST /office/grip:", err);
-    return res.status(500).json({ ok: false, error: "internal_error", detail: err.message });
+    return res
+      .status(500)
+      .json({ ok: false, error: "internal_error", detail: err.message });
   }
 });
 
@@ -674,7 +713,8 @@ app.post("/office/rmr", async (req, res) => {
     const cleanUserId = uuidRegex.test(userId || "") ? userId : null;
     const tsIso = toIsoOrNull(measuredAt) || new Date().toISOString();
     const dk = dayKeyUtc(tsIso);
-    if (!dk) return res.status(400).json({ ok: false, error: "invalid_measuredAt" });
+    if (!dk)
+      return res.status(400).json({ ok: false, error: "invalid_measuredAt" });
 
     const hasAny = rmrKcalDay != null || vo2MlMin != null || vco2MlMin != null || rer != null;
     if (!hasAny) {
@@ -715,13 +755,19 @@ app.post("/office/rmr", async (req, res) => {
 
     if (error) {
       console.error("❌ Supabase insert error in /office/rmr:", error);
-      return res.status(500).json({ ok: false, error: "db_insert_failed", detail: error.message || error.code });
+      return res.status(500).json({
+        ok: false,
+        error: "db_insert_failed",
+        detail: error.message || error.code,
+      });
     }
 
     return res.status(200).json({ ok: true, assessment: data?.[0] || null });
   } catch (err) {
     console.error("Error in POST /office/rmr:", err);
-    return res.status(500).json({ ok: false, error: "internal_error", detail: err.message });
+    return res
+      .status(500)
+      .json({ ok: false, error: "internal_error", detail: err.message });
   }
 });
 
@@ -865,6 +911,10 @@ app.get("/daily-snapshots", async (req, res) => {
       if (!rangeTo && dates.length) rangeTo = dates[dates.length - 1];
     }
 
+    // ✅ NEW: Expand overlay window to whole days so same-day clinic measurements later in the day are included
+    if (rangeFrom) rangeFrom = startOfDayUtc(rangeFrom);
+    if (rangeTo) rangeTo = endOfDayUtc(rangeTo);
+
     // 3) load OFFICE measurements in range (safe)
     let officeByDay = new Map();
     try {
@@ -883,15 +933,25 @@ app.get("/daily-snapshots", async (req, res) => {
         for (const om of officeRows) {
           const dk = om.day_key || dayKeyUtc(om.measured_at);
           if (!dk) continue;
-          if (!officeByDay.has(dk) && om.bp_systolic != null && om.bp_diastolic != null) {
+          if (
+            !officeByDay.has(dk) &&
+            om.bp_systolic != null &&
+            om.bp_diastolic != null
+          ) {
             officeByDay.set(dk, om);
           }
         }
       } else if (officeErr) {
-        console.warn("⚠️ office_measurements query failed:", officeErr.message || officeErr.code);
+        console.warn(
+          "⚠️ office_measurements query failed:",
+          officeErr.message || officeErr.code
+        );
       }
     } catch (e) {
-      console.warn("⚠️ office_measurements overlay skipped:", e?.message || String(e));
+      console.warn(
+        "⚠️ office_measurements overlay skipped:",
+        e?.message || String(e)
+      );
     }
 
     // 4) load CONNEQT assessments in range (safe)
@@ -899,7 +959,9 @@ app.get("/daily-snapshots", async (req, res) => {
     try {
       let cq = supabase
         .from("conneqt_assessments")
-        .select("measured_at,day_key,brachial_systolic,brachial_diastolic,quality")
+        .select(
+          "measured_at,day_key,brachial_systolic,brachial_diastolic,quality"
+        )
         .order("measured_at", { ascending: false })
         .limit(500);
 
@@ -927,7 +989,10 @@ app.get("/daily-snapshots", async (req, res) => {
         );
       }
     } catch (e) {
-      console.warn("⚠️ conneqt_assessments overlay skipped:", e?.message || String(e));
+      console.warn(
+        "⚠️ conneqt_assessments overlay skipped:",
+        e?.message || String(e)
+      );
     }
 
     // 5) map + merge BP precedence into returned DTO
@@ -1030,8 +1095,14 @@ app.get("/metric-summary", async (req, res) => {
       glucose: { field: "glucose_mg_dl", unit: "mg/dL" },
       bp: { getter: (row) => row.bp_systolic ?? null, unit: "mmHg" },
       rr: { field: "respiratory_rate", unit: "breaths/min" },
-      adherence: { getter: (row) => (row.raw_json && row.raw_json.adherence) ?? null, unit: "score" },
-      readiness: { getter: (row) => (row.raw_json && row.raw_json.readiness) ?? null, unit: "score" },
+      adherence: {
+        getter: (row) => (row.raw_json && row.raw_json.adherence) ?? null,
+        unit: "score",
+      },
+      readiness: {
+        getter: (row) => (row.raw_json && row.raw_json.readiness) ?? null,
+        unit: "score",
+      },
     };
 
     const cfg = metricConfig[metric];
@@ -1086,7 +1157,11 @@ app.get("/metric-summary", async (req, res) => {
           for (const r of oRows) {
             const dk = r.day_key || dayKeyUtc(r.measured_at);
             if (!dk) continue;
-            if (!officeByDay.has(dk) && r.bp_systolic != null && r.bp_diastolic != null) {
+            if (
+              !officeByDay.has(dk) &&
+              r.bp_systolic != null &&
+              r.bp_diastolic != null
+            ) {
               officeByDay.set(dk, r);
             }
           }
@@ -1106,7 +1181,11 @@ app.get("/metric-summary", async (req, res) => {
           for (const r of cRows) {
             const dk = r.day_key || dayKeyUtc(r.measured_at);
             if (!dk) continue;
-            if (!conneqtByDay.has(dk) && r.brachial_systolic != null && r.brachial_diastolic != null) {
+            if (
+              !conneqtByDay.has(dk) &&
+              r.brachial_systolic != null &&
+              r.brachial_diastolic != null
+            ) {
               conneqtByDay.set(dk, r);
             }
           }
@@ -1180,17 +1259,21 @@ app.get("/metric-summary", async (req, res) => {
 app.get("/anchors/latest", async (req, res) => {
   try {
     const { userId } = req.query;
-    const cleanUserId = userId && uuidRegex.test(String(userId)) ? String(userId) : null;
+    const cleanUserId =
+      userId && uuidRegex.test(String(userId)) ? String(userId) : null;
 
     async function latestFrom(table, selectCols) {
-      let q = supabase.from(table).select(selectCols).order("measured_at", { ascending: false }).limit(1);
+      let q = supabase
+        .from(table)
+        .select(selectCols)
+        .order("measured_at", { ascending: false })
+        .limit(1);
       if (cleanUserId) q = q.eq("user_id", cleanUserId);
       const { data, error } = await q;
       if (error) return { ok: false, error: error.message || error.code, row: null };
       return { ok: true, row: data?.[0] || null };
     }
 
-    // Each query is independent; missing tables won't break the whole response.
     const [conneqt, tanita, grip, rmr] = await Promise.all([
       latestFrom(
         "conneqt_assessments",
@@ -1210,8 +1293,6 @@ app.get("/anchors/latest", async (req, res) => {
       ),
     ]);
 
-    // If a table doesn't exist yet, Supabase often returns an error.
-    // We will still return ok:true overall, but include per-anchor status.
     return res.json({
       ok: true,
       filter: { userId: cleanUserId }, // null means "global latest"
@@ -1236,7 +1317,11 @@ app.get("/anchors/latest", async (req, res) => {
     });
   } catch (err) {
     console.error("Error in GET /anchors/latest:", err);
-    return res.status(500).json({ ok: false, error: "internal_error", detail: err.message });
+    return res.status(500).json({
+      ok: false,
+      error: "internal_error",
+      detail: err.message,
+    });
   }
 });
 
@@ -1261,3 +1346,4 @@ const PORT = process.env.PORT || 3001;
 app.listen(PORT, () => {
   console.log(`✅ Server running on http://localhost:${PORT}`);
 });
+
