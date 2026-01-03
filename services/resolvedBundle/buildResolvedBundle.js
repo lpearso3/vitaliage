@@ -1,6 +1,7 @@
 // services/resolvedBundle/buildResolvedBundle.js
 const crypto = require("crypto");
 const { buildDailySnapshotTrends } = require("./dailySnapshotTrends");
+const { buildResolvedMetrics } = require("./resolvedMetrics");
 
 /**
  * Deterministic JSON stringify with stable key ordering.
@@ -33,6 +34,10 @@ function sha256Hex(input) {
  *
  * Step 2 bundle_hash canon:
  * - MUST change when: bundle_day_key, window_days, or any daily_snapshot in-window changes
+ * - MUST NOT include: anchors, interpretation, confidence, AI outputs
+ *
+ * Step 3 bundle_hash canon:
+ * - MUST include: Step 2 inputs + any resolved_metrics included
  * - MUST NOT include: anchors, interpretation, confidence, AI outputs
  */
 async function buildResolvedBundle({
@@ -77,6 +82,24 @@ async function buildResolvedBundle({
       );
     }
     return data?.[0] || null;
+  }
+
+  async function allForDay(table, selectCols, dayKey) {
+    let q = supabase
+      .from(table)
+      .select(selectCols)
+      .eq("day_key", dayKey)
+      .order("measured_at", { ascending: false });
+
+    if (userId) q = q.eq("user_id", userId);
+
+    const { data, error } = await q;
+    if (error) {
+      throw new Error(
+        `allForDay ${table} failed: ${error.message || error.code}`
+      );
+    }
+    return data || [];
   }
 
   // --- Step 2: daily_snapshots selection (locked rules) ---
@@ -127,6 +150,33 @@ async function buildResolvedBundle({
     ),
   ]);
 
+  // --- Step 3: precedence-aware resolution (same-day anchors only, v1) ---
+  const dailySnapshotForDay =
+    snapshots.find((s) => s.day_key === bundleDayKey) || null;
+
+  const [sameDayConneqt, sameDayTanita] = await Promise.all([
+    allForDay(
+      "conneqt_assessments",
+      "id,user_id,measured_at,day_key,quality,device,brachial_systolic,brachial_diastolic,heart_rate,raw_json",
+      bundleDayKey
+    ),
+    allForDay(
+      "tanita_assessments",
+      "id,user_id,measured_at,day_key,quality,device,weight_kg,body_fat_pct,raw_json",
+      bundleDayKey
+    ),
+  ]);
+
+  const resolved_metrics = buildResolvedMetrics({
+    bundleDayKey,
+    dailySnapshotForDay,
+    sameDay: {
+      conneqt: sameDayConneqt,
+      tanita: sameDayTanita,
+    },
+  });
+  // --- end Step 3 ---
+
   const baseBundle = {
     user_id: userId,
     bundle_day_key: bundleDayKey,
@@ -146,6 +196,9 @@ async function buildResolvedBundle({
       rmr,
     },
 
+    // Step 3 output (present only when resolution occurs)
+    ...(resolved_metrics ? { resolved_metrics } : {}),
+
     // Placeholders (unchanged)
     derived_metrics: {},
     confidence: {},
@@ -153,7 +206,7 @@ async function buildResolvedBundle({
     provenance_summary: {},
   };
 
-  // Step 2 canonical hash payload (anchors excluded)
+  // Step 2 canonical hash payload (anchors excluded) + Step 3 resolved_metrics when present
   const hashPayload = {
     bundle_day_key: bundleDayKey,
     window_days,
@@ -172,6 +225,7 @@ async function buildResolvedBundle({
       skin_temp_delta: s.skin_temp_delta ?? null,
       blood_oxygen: s.blood_oxygen ?? null,
     })),
+    ...(resolved_metrics ? { resolved_metrics } : {}),
   };
 
   const bundle_hash = sha256Hex(stableStringify(hashPayload));
