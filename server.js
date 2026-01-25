@@ -164,6 +164,19 @@ const supabase = createClient(process.env.SUPABASE_URL, supabaseKey);
 app.get("/", (_req, res) => res.send("Vitaliage Push API ✅"));
 app.get("/ping", (_req, res) => res.json({ ok: true }));
 
+// --- OpenAPI contract (authoritative) ---
+app.get("/docs/api-contract.yaml", (_req, res) => {
+  try {
+    res.setHeader("Content-Type", "application/yaml; charset=utf-8");
+    res.setHeader("Cache-Control", "no-store");
+    return res.sendFile(path.join(__dirname, "docs", "api-contract.yaml"));
+  } catch (_e) {
+    return res
+      .status(500)
+      .json({ ok: false, error: "Failed to serve api-contract.yaml" });
+  }
+});
+
 // --- Resolved Bundle ---
 app.get("/resolved-bundle", async (req, res) => {
   try {
@@ -904,18 +917,6 @@ app.post("/office/rmr", async (req, res) => {
   }
 });
 
-// -------------------------------------------------------
-// STATIC + DASHBOARD SPA (MUST BE AFTER API ROUTES)
-// -------------------------------------------------------
-app.use(express.static(path.join(__dirname, "public")));
-app.use(
-  "/dashboard",
-  express.static(path.join(__dirname, "public", "dashboard"))
-);
-app.get(/^\/dashboard(\/.*)?$/, (_req, res) => {
-  res.sendFile(path.join(__dirname, "public", "dashboard", "index.html"));
-});
-
 // --- Debug: list all registered routes ---
 function listRoutes() {
   const out = [];
@@ -930,6 +931,18 @@ function listRoutes() {
   return out;
 }
 app.get("/__routes", (_req, res) => res.json(listRoutes()));
+
+// -------------------------------------------------------
+// STATIC + DASHBOARD SPA (MUST BE AFTER API ROUTES)
+// -------------------------------------------------------
+app.use(express.static(path.join(__dirname, "public")));
+app.use(
+  "/dashboard",
+  express.static(path.join(__dirname, "public", "dashboard"))
+);
+app.get(/^\/dashboard(\/.*)?$/, (_req, res) => {
+  res.sendFile(path.join(__dirname, "public", "dashboard", "index.html"));
+});
 
 // --- Start server ---
 const PORT = process.env.PORT || 3001;
