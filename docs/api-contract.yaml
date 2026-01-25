@@ -22,6 +22,7 @@ paths:
             text/plain:
               schema:
                 type: string
+                example: "Vitaliage Push API ✅"
 
   /ping:
     get:
@@ -77,8 +78,10 @@ paths:
                 properties:
                   connected:
                     type: boolean
+                    example: true
                   rows_found:
                     type: integer
+                    example: 1
                   sample_row:
                     nullable: true
                     oneOf:
@@ -286,6 +289,8 @@ paths:
                       device:
                         type: object
                         additionalProperties: true
+        "404":
+          description: No active devices found
 
   /office/measurements:
     post:
@@ -321,6 +326,10 @@ paths:
                     nullable: true
                     type: object
                     additionalProperties: true
+        "400":
+          description: Bad request
+        "500":
+          description: Server error
 
   /office/conneqt:
     post:
@@ -364,6 +373,10 @@ paths:
                     nullable: true
                     type: object
                     additionalProperties: true
+        "400":
+          description: Bad request
+        "500":
+          description: Server error
 
   /office/tanita:
     post:
@@ -405,6 +418,10 @@ paths:
                     nullable: true
                     type: object
                     additionalProperties: true
+        "400":
+          description: Bad request
+        "500":
+          description: Server error
 
   /office/grip:
     post:
@@ -448,6 +465,10 @@ paths:
                     nullable: true
                     type: object
                     additionalProperties: true
+        "400":
+          description: Bad request
+        "500":
+          description: Server error
 
   /office/rmr:
     post:
@@ -486,6 +507,10 @@ paths:
                     nullable: true
                     type: object
                     additionalProperties: true
+        "400":
+          description: Bad request
+        "500":
+          description: Server error
 
 components:
   schemas:
@@ -499,6 +524,7 @@ components:
         - latest_anchors
         - resolved_metrics
         - resolved_metrics_provenance
+        - derived_metrics
         - confidence
         - flags
         - provenance_summary
