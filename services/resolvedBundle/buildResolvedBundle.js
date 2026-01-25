@@ -33,33 +33,46 @@ function sha256Hex(input) {
   return crypto.createHash("sha256").update(input, "utf8").digest("hex");
 }
 
+// --- Snapshot time helpers (UTC canonical) ---
+function dayKeyFromTimestamptz(snapshotDate) {
+  const d = snapshotDate instanceof Date ? snapshotDate : new Date(snapshotDate);
+  if (isNaN(d.getTime())) return null;
+  return d.toISOString().slice(0, 10); // YYYY-MM-DD (UTC)
+}
+
+function startOfUtcDayFromDayKey(dayKey /* YYYY-MM-DD */) {
+  const d = new Date(`${dayKey}T00:00:00.000Z`);
+  if (isNaN(d.getTime())) return null;
+  return d.toISOString();
+}
+
+function addDaysIso(iso, days) {
+  const d = new Date(iso);
+  if (isNaN(d.getTime())) return null;
+  d.setUTCDate(d.getUTCDate() + days);
+  return d.toISOString();
+}
+
 /**
- * Deterministically dedupe multiple daily_snapshots rows for the same day_key.
- * Rule: keep latest created_at; tie-break by id.
- * Returns rows sorted by day_key ASC.
+ * Deterministically pick ONE snapshot per UTC day:
+ * - newest snapshot_date wins
+ * - tie-breaker: newest created_at wins
+ *
+ * IMPORTANT: This function expects rows already sorted by:
+ *   snapshot_date DESC, created_at DESC
+ *
+ * Returns rows sorted by day_key ASC (chronological).
  */
-function dedupeDailySnapshotsByDayKey(rows) {
-  const bestByDay = new Map();
+function dedupeLatestPerDay(rows) {
+  const bestByDay = new Map(); // day_key -> row
 
   for (const r of rows || []) {
-    const day = r?.day_key;
-    if (!day) continue;
+    const dk = r?.day_key || dayKeyFromTimestamptz(r?.snapshot_date);
+    if (!dk) continue;
 
-    const prev = bestByDay.get(day);
-    if (!prev) {
-      bestByDay.set(day, r);
-      continue;
-    }
-
-    const tPrev = Date.parse(prev.created_at || "") || -Infinity;
-    const tCurr = Date.parse(r.created_at || "") || -Infinity;
-
-    if (tCurr > tPrev) {
-      bestByDay.set(day, r);
-    } else if (tCurr === tPrev) {
-      const a = String(prev.id || "");
-      const b = String(r.id || "");
-      if (b > a) bestByDay.set(day, r);
+    // Because rows are sorted newest-first, the first row we see for a day wins.
+    if (!bestByDay.has(dk)) {
+      bestByDay.set(dk, { ...r, day_key: dk });
     }
   }
 
@@ -166,14 +179,28 @@ async function buildResolvedBundle({
   }
 
   // --- Step 2: daily_snapshots selection (locked rules) ---
-  const startExclusive = subtractDays(bundleDayKey, window_days);
+  // Window is [startDay 00:00Z, endDay+1 00:00Z)
+  const endStartIso = startOfUtcDayFromDayKey(bundleDayKey);
+  if (!endStartIso) throw new Error(`Invalid bundleDayKey: ${bundleDayKey}`);
+
+  const startStartIso = addDaysIso(endStartIso, -(window_days - 1));
+  if (!startStartIso) {
+    throw new Error(`Failed to compute start of window from ${bundleDayKey}`);
+  }
+
+  const endExclusiveIso = addDaysIso(endStartIso, 1);
+  if (!endExclusiveIso) {
+    throw new Error(`Failed to compute endExclusive from ${bundleDayKey}`);
+  }
 
   let dsQuery = supabase
     .from("daily_snapshots")
     .select("*")
-    .lte("snapshot_date", bundleDayKey)
-    .gt("snapshot_date", startExclusive)
-    .order("snapshot_date", { ascending: true });
+    .gte("snapshot_date", startStartIso)
+    .lt("snapshot_date", endExclusiveIso)
+    // IMPORTANT: newest first so our dedupe keeps the newest per day
+    .order("snapshot_date", { ascending: false })
+    .order("created_at", { ascending: false });
 
   if (userId) dsQuery = dsQuery.eq("user_id", userId);
 
@@ -184,10 +211,15 @@ async function buildResolvedBundle({
     );
   }
 
-  // Normalize -> dedupe: deterministically enforce "one snapshot per day_key"
-  const snapshots = dedupeDailySnapshotsByDayKey(
-    (dailySnapshots || []).map(normalizeDailySnapshot)
-  );
+  // Normalize -> enforce canonical day_key -> dedupe newest-per-day -> chronological sort
+  const normalizedSnapshots = (dailySnapshots || []).map((row) => {
+    const n = normalizeDailySnapshot(row);
+    // Ensure day_key is derived from snapshot_date (UTC) regardless of what normalize does
+    const dk = dayKeyFromTimestamptz(n.snapshot_date || row.snapshot_date);
+    return { ...n, day_key: dk };
+  });
+
+  const snapshots = dedupeLatestPerDay(normalizedSnapshots);
 
   const daily_snapshot_trends = buildDailySnapshotTrends({
     snapshots,
