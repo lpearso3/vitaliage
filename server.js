@@ -32,8 +32,6 @@ function dayKeyUtc(isoOrDate) {
   if (isNaN(d.getTime())) return null;
   return d.toISOString().slice(0, 10); // YYYY-MM-DD
 }
-
-// expand overlay windows to whole UTC days
 function startOfDayUtc(isoOrDate) {
   const d = isoOrDate instanceof Date ? isoOrDate : new Date(isoOrDate);
   if (isNaN(d.getTime())) return null;
@@ -50,9 +48,6 @@ function endOfDayUtc(isoOrDate) {
 }
 
 // --- Integration hygiene guards ---
-// Canon: confidence.metrics MUST NOT exist. Only confidence.overall/trends/resolved are allowed.
-// Also assert required top-level ResolvedBundle keys exist (lightweight runtime contract validation).
-
 const REQUIRED_BUNDLE_KEYS = [
   "user_id",
   "bundle_day_key",
@@ -83,7 +78,6 @@ function validateBundleShape(bundle) {
     return { ok: false, error: "Invalid bundle shape: bundle must be an object." };
   }
 
-  // Required top-level keys (canonical ResolvedBundle)
   const missing = REQUIRED_BUNDLE_KEYS.filter(
     (k) => !Object.prototype.hasOwnProperty.call(bundle, k)
   );
@@ -94,7 +88,6 @@ function validateBundleShape(bundle) {
     };
   }
 
-  // bundle_hash must be a non-empty string
   if (typeof bundle.bundle_hash !== "string" || bundle.bundle_hash.length === 0) {
     return {
       ok: false,
@@ -103,12 +96,10 @@ function validateBundleShape(bundle) {
   }
 
   const conf = bundle.confidence;
-
   if (!conf || typeof conf !== "object") {
     return { ok: false, error: "Invalid bundle shape: missing confidence object." };
   }
 
-  // Explicitly forbid confidence.metrics (legacy)
   if (Object.prototype.hasOwnProperty.call(conf, "metrics")) {
     return {
       ok: false,
@@ -117,7 +108,6 @@ function validateBundleShape(bundle) {
     };
   }
 
-  // Defensive: catch any nested "metrics" key anywhere inside confidence
   if (hasDeepKey(conf, "metrics")) {
     return {
       ok: false,
@@ -126,7 +116,6 @@ function validateBundleShape(bundle) {
     };
   }
 
-  // Require canonical keys
   const hasOverall = Object.prototype.hasOwnProperty.call(conf, "overall");
   const hasTrends = Object.prototype.hasOwnProperty.call(conf, "trends");
   const hasResolved = Object.prototype.hasOwnProperty.call(conf, "resolved");
@@ -143,7 +132,6 @@ function validateBundleShape(bundle) {
 }
 
 // --- Supabase client ---
-// Prefer SUPABASE_SERVICE_ROLE_KEY (canon). Fallback to older names so you don't get blocked.
 const supabaseKey =
   process.env.SUPABASE_SERVICE_ROLE_KEY ||
   process.env.SUPABASE_SERVICE_KEY ||
@@ -192,7 +180,7 @@ app.get("/resolved-bundle", async (req, res) => {
     }
 
     const bundle = await buildResolvedBundle({
-      supabase, // required so builder can fetch latest anchors
+      supabase,
       userId,
       bundleDayKey: dayKey,
       windowDays,
@@ -228,20 +216,23 @@ app.get("/db-check", async (_req, res) => {
 });
 
 // =======================================================
-// WEARABLE DAILY SNAPSHOT INGEST (iOS / Android / Oura / Garmin)
+// WEARABLE DAILY SNAPSHOT INGEST
+// Endpoint: POST /snapshot
 // Table: daily_snapshots
-// NOTE: Supabase schema uses snapshot_date (timestamptz). There is NO day_key column.
+//
+// IMPORTANT: Match Supabase schema exactly.
+// - Uses snapshot_date (timestamptz)
+// - DOES NOT write: day_key, source, device
+// - Keep client metadata inside raw_json
 // =======================================================
 app.post("/snapshot", async (req, res) => {
   try {
     const body = req.body || {};
 
-    // Accept both camelCase (iOS) and snake_case (other clients)
     const cleanUserId = uuidRegex.test(body.userId || body.user_id || "")
       ? body.userId || body.user_id
       : null;
 
-    // Canonical storage column is snapshot_date (TIMESTAMPTZ)
     const snapshotDateIso =
       toIsoOrNull(body.date || body.snapshot_date || body.snapshotDate) ||
       new Date().toISOString();
@@ -251,6 +242,7 @@ app.post("/snapshot", async (req, res) => {
       return res.status(400).json({ ok: false, error: "invalid_date" });
     }
 
+    // NOTE: Only include columns that exist in public.daily_snapshots
     const payload = {
       user_id: cleanUserId,
       snapshot_date: snapshotDate.toISOString(),
@@ -264,16 +256,15 @@ app.post("/snapshot", async (req, res) => {
       bp_systolic: body.bpSystolic ?? body.bp_systolic ?? null,
       bp_diastolic: body.bpDiastolic ?? body.bp_diastolic ?? null,
 
-      // Sleep summary (optional)
       sleep_total_minutes:
         body.sleep?.totalMinutes ?? body.sleep_total_minutes ?? null,
       sleep_goal_minutes: body.sleep?.goalMinutes ?? body.sleep_goal_minutes ?? null,
       sleep_met_goal: body.sleep?.metGoal ?? body.sleep_met_goal ?? null,
 
-  
-      // Body & nutrition (optional)
       weight_kg: body.weightKg ?? body.weight_kg ?? null,
-      body_fat_percent: body.bodyFatPercent ?? body.body_fat_percent ?? null,
+      // accept multiple client spellings, write to the DB column name
+      body_fat_percent:
+        body.bodyFatPercent ?? body.body_fat_percent ?? body.body_fat_pct ?? null,
       waist_cm: body.waistCm ?? body.waist_cm ?? null,
       calories_in: body.caloriesIn ?? body.calories_in ?? null,
       protein_g: body.proteinG ?? body.protein_g ?? null,
@@ -281,11 +272,9 @@ app.post("/snapshot", async (req, res) => {
       fat_g: body.fatG ?? body.fat_g ?? null,
       hydration_ml: body.hydrationMl ?? body.hydration_ml ?? null,
 
-      // raw_json for audit/debug
       raw_json: body,
     };
 
-    // Must have at least one metric (avoid empty inserts)
     const hasAny =
       payload.steps != null ||
       payload.resting_hr != null ||
@@ -296,6 +285,8 @@ app.post("/snapshot", async (req, res) => {
       payload.bp_systolic != null ||
       payload.bp_diastolic != null ||
       payload.sleep_total_minutes != null ||
+      payload.sleep_goal_minutes != null ||
+      payload.sleep_met_goal != null ||
       payload.weight_kg != null ||
       payload.body_fat_percent != null ||
       payload.waist_cm != null ||
@@ -359,7 +350,6 @@ app.post("/devices", async (req, res) => {
       });
     }
 
-    // Best-effort last_seen update (ignore errors)
     try {
       await supabase
         .from("devices")
@@ -394,7 +384,7 @@ async function handleSend(req, res) {
     silent = false,
     collapseId,
     priority,
-    pushType, // optional: 'alert' | 'background'
+    pushType,
   } = req.body || {};
 
   if (!token)
@@ -442,18 +432,15 @@ app.post("/push-latest", async (req, res) => {
       pushType,
     } = req.body || {};
 
-    // Build base query: only active devices
     let query = supabase
       .from("devices")
       .select("id,user_id,platform,token,active,last_seen,created_at")
       .eq("active", true);
 
-    // If a valid userId is provided, filter by that user
     if (userId && uuidRegex.test(userId)) {
       query = query.eq("user_id", userId);
     }
 
-    // Order by most recently seen
     query = query.order("last_seen", { ascending: false }).limit(1);
 
     const { data: rows, error } = await query;
@@ -528,7 +515,7 @@ app.post("/office/measurements", async (req, res) => {
       device,
       operator,
       conditions,
-      quality, // "high" | "medium" | "low"
+      quality,
     } = payload;
 
     const cleanUserId = uuidRegex.test(userId || "") ? userId : null;
@@ -552,7 +539,6 @@ app.post("/office/measurements", async (req, res) => {
       });
     }
 
-    // BP should come as a pair if present
     if (
       (bpSystolic != null && bpDiastolic == null) ||
       (bpDiastolic != null && bpSystolic == null)
@@ -623,7 +609,7 @@ app.post("/office/conneqt", async (req, res) => {
       device = "CONNEQT Pulse",
       operator,
       conditions,
-      quality, // "high" | "medium" | "low"
+      quality,
 
       brachialSystolic,
       brachialDiastolic,
@@ -669,7 +655,6 @@ app.post("/office/conneqt", async (req, res) => {
       });
     }
 
-    // Pair checks for BP fields
     if (
       (brachialSystolic != null && brachialDiastolic == null) ||
       (brachialDiastolic != null && brachialSystolic == null)
@@ -759,7 +744,7 @@ app.post("/office/tanita", async (req, res) => {
       device = "Tanita MC-580",
       operator,
       conditions,
-      quality, // "high" | "medium" | "low"
+      quality,
 
       weightKg,
       bodyFatPct,
@@ -863,9 +848,9 @@ app.post("/office/grip", async (req, res) => {
       device = "Jamar",
       operator,
       conditions,
-      quality, // "high" | "medium" | "low"
+      quality,
 
-      unit = "kgf", // "kgf" | "lbs"
+      unit = "kgf",
       leftBest,
       rightBest,
       leftAttempts,
@@ -952,7 +937,7 @@ app.post("/office/rmr", async (req, res) => {
       device = "KORR ReeVue",
       operator,
       conditions,
-      quality, // "high" | "medium" | "low"
+      quality,
 
       rmrKcalDay,
       vo2MlMin,
