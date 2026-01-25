@@ -227,6 +227,107 @@ app.get("/db-check", async (_req, res) => {
   }
 });
 
+// =======================================================
+// WEARABLE DAILY SNAPSHOT INGEST (iOS / Android / Oura / Garmin)
+// Table: daily_snapshots
+// =======================================================
+app.post("/snapshot", async (req, res) => {
+  try {
+    const body = req.body || {};
+
+    // Accept both camelCase (iOS) and snake_case (other clients)
+    const cleanUserId = uuidRegex.test(body.userId || body.user_id || "")
+      ? body.userId || body.user_id
+      : null;
+
+    const snapshotDateIso = toIsoOrNull(body.date || body.snapshot_date) || new Date().toISOString();
+    const dk = dayKeyUtc(snapshotDateIso);
+    if (!dk) {
+      return res.status(400).json({ ok: false, error: "invalid_date" });
+    }
+
+    const payload = {
+      user_id: cleanUserId,
+      snapshot_date: snapshotDateIso,
+      day_key: dk,
+
+      steps: body.steps ?? null,
+      resting_hr: body.restingHR ?? body.resting_hr ?? null,
+      hrv: body.hrv ?? null,
+      vo2_max: body.vo2Max ?? body.vo2_max ?? null,
+      respiratory_rate: body.respiratoryRate ?? body.respiratory_rate ?? null,
+      glucose_mg_dl: body.glucoseMgDl ?? body.glucose_mg_dl ?? null,
+      bp_systolic: body.bpSystolic ?? body.bp_systolic ?? null,
+      bp_diastolic: body.bpDiastolic ?? body.bp_diastolic ?? null,
+
+      // Sleep summary (optional)
+      sleep_total_minutes: body.sleep?.totalMinutes ?? body.sleep_total_minutes ?? null,
+      sleep_goal_minutes: body.sleep?.goalMinutes ?? body.sleep_goal_minutes ?? null,
+      sleep_met_goal: body.sleep?.metGoal ?? body.sleep_met_goal ?? null,
+
+      // Source metadata (optional)
+      source: body.source ?? null,
+      device: body.device ?? null,
+
+      // Body & nutrition (optional)
+      weight_kg: body.weightKg ?? body.weight_kg ?? null,
+      body_fat_percent: body.bodyFatPercent ?? body.body_fat_percent ?? null,
+      waist_cm: body.waistCm ?? body.waist_cm ?? null,
+      calories_in: body.caloriesIn ?? body.calories_in ?? null,
+      protein_g: body.proteinG ?? body.protein_g ?? null,
+      carb_g: body.carbG ?? body.carb_g ?? null,
+      fat_g: body.fatG ?? body.fat_g ?? null,
+      hydration_ml: body.hydrationMl ?? body.hydration_ml ?? null,
+
+      // raw_json for audit/debug
+      raw_json: body,
+    };
+
+    // Must have at least one metric (avoid empty inserts)
+    const hasAny =
+      payload.steps != null ||
+      payload.resting_hr != null ||
+      payload.hrv != null ||
+      payload.vo2_max != null ||
+      payload.respiratory_rate != null ||
+      payload.glucose_mg_dl != null ||
+      payload.bp_systolic != null ||
+      payload.bp_diastolic != null ||
+      payload.sleep_total_minutes != null ||
+      payload.weight_kg != null;
+
+    if (!hasAny) {
+      return res.status(400).json({
+        ok: false,
+        error: "empty_snapshot",
+        message: "Provide at least one wearable metric.",
+      });
+    }
+
+    const { data, error } = await supabase
+      .from("daily_snapshots")
+      .insert(payload)
+      .select("*")
+      .limit(1);
+
+    if (error) {
+      console.error("Supabase insert error in /snapshot:", error);
+      return res.status(500).json({
+        ok: false,
+        error: "db_insert_failed",
+        detail: error.message || error.code,
+      });
+    }
+
+    return res.status(200).json({ ok: true, snapshot: data?.[0] || null });
+  } catch (err) {
+    console.error("Error in POST /snapshot:", err);
+    return res
+      .status(500)
+      .json({ ok: false, error: "internal_error", detail: err.message });
+  }
+});
+
 // --- UPSERT device token ---
 app.post("/devices", async (req, res) => {
   const { userId, platform = "ios", token } = req.body || {};
