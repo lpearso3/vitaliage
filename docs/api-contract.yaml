@@ -1,12 +1,907 @@
-VITALIAGE-push-api/
-  node_modules/
-  public/
-  vitaliage-dashboard/
-  dist/
-  src/
-  .env
-  server.js
-  package.json
-  README.md
-  docs/                   ← CREATE THIS
-    api-contract.yaml     ← PASTE OPENAPI HERE
+openapi: 3.0.3
+info:
+  title: Vitaliage ResolvedBundle API
+  version: "1.0.1"
+  description: >
+    Canonical backend API for Vitaliage clinical intelligence.
+    All downstream consumers MUST rely on ResolvedBundle only.
+    This contract supersedes all prior shapes.
+
+servers:
+  - url: https://vitaliage.onrender.com
+  - url: http://localhost:3001
+
+paths:
+  /:
+    get:
+      summary: Health root
+      responses:
+        "200":
+          description: OK
+          content:
+            text/plain:
+              schema:
+                type: string
+
+  /ping:
+    get:
+      summary: Simple health ping
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [ok]
+                properties:
+                  ok:
+                    type: boolean
+                    example: true
+
+  /__routes:
+    get:
+      summary: Debug list of registered routes
+      responses:
+        "200":
+          description: Route list
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+                  required: [methods, path]
+                  properties:
+                    methods:
+                      type: array
+                      items:
+                        type: string
+                    path:
+                      oneOf:
+                        - type: string
+                        - type: object
+                          additionalProperties: true
+
+  /db-check:
+    get:
+      summary: DB connectivity check
+      responses:
+        "200":
+          description: Connected
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [connected, rows_found, sample_row]
+                properties:
+                  connected:
+                    type: boolean
+                  rows_found:
+                    type: integer
+                  sample_row:
+                    nullable: true
+                    oneOf:
+                      - type: object
+                        additionalProperties: true
+        "500":
+          description: Not connected
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [connected, error]
+                properties:
+                  connected:
+                    type: boolean
+                    example: false
+                  error:
+                    type: string
+
+  /resolved-bundle:
+    get:
+      summary: Get canonical ResolvedBundle
+      description: >
+        Returns the fully resolved, normalized, confidence-scored clinical bundle
+        for a given user and bundle day. This is the sole downstream contract.
+      parameters:
+        - in: query
+          name: dayKey
+          required: true
+          schema:
+            type: string
+            example: "2026-01-24"
+        - in: query
+          name: windowDays
+          required: false
+          schema:
+            type: integer
+            default: 28
+        - in: query
+          name: userId
+          required: false
+          schema:
+            type: string
+            nullable: true
+            description: Nullable UUID; if omitted, query is not filtered by user_id (schema preserved).
+      responses:
+        "200":
+          description: Resolved bundle
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [ok, bundle]
+                properties:
+                  ok:
+                    type: boolean
+                    example: true
+                  bundle:
+                    $ref: "#/components/schemas/ResolvedBundle"
+        "400":
+          description: Bad request
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [ok, error]
+                properties:
+                  ok:
+                    type: boolean
+                    example: false
+                  error:
+                    type: string
+        "500":
+          description: Server error
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [ok, error]
+                properties:
+                  ok:
+                    type: boolean
+                    example: false
+                  error:
+                    type: string
+
+  /devices:
+    post:
+      summary: Upsert device token
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [token]
+              properties:
+                userId:
+                  type: string
+                  nullable: true
+                platform:
+                  type: string
+                  example: ios
+                token:
+                  type: string
+      responses:
+        "200":
+          description: Stored
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message:
+                    type: string
+                  device:
+                    nullable: true
+                    type: object
+                    additionalProperties: true
+        "400":
+          description: Missing token
+        "500":
+          description: Server error
+
+  /push:
+    post:
+      summary: Send push (alias)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/PushRequest"
+      responses:
+        "200":
+          description: Push response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PushResponse"
+        "400":
+          description: Bad request
+        "500":
+          description: Server error
+
+  /api/push:
+    post:
+      summary: Send push (alias)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/PushRequest"
+      responses:
+        "200":
+          description: Push response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PushResponse"
+
+  /push/send:
+    post:
+      summary: Send push (alias)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/PushRequest"
+      responses:
+        "200":
+          description: Push response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PushResponse"
+
+  /push-latest:
+    post:
+      summary: Send push to most recently active device
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              allOf:
+                - $ref: "#/components/schemas/PushRequest"
+                - type: object
+                  properties:
+                    userId:
+                      type: string
+                      nullable: true
+      responses:
+        "200":
+          description: Push response
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/PushResponse"
+                  - type: object
+                    properties:
+                      device:
+                        type: object
+                        additionalProperties: true
+
+  /office/measurements:
+    post:
+      summary: Staff entry office measurements (legacy/general)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                userId: { type: string, nullable: true }
+                measuredAt: { type: string, format: date-time, nullable: true }
+                bpSystolic: { type: number, nullable: true }
+                bpDiastolic: { type: number, nullable: true }
+                weightKg: { type: number, nullable: true }
+                bodyFatPct: { type: number, nullable: true }
+                device: { type: string, nullable: true }
+                operator: { type: string, nullable: true }
+                conditions: { type: string, nullable: true }
+                quality: { type: string, nullable: true }
+      responses:
+        "200":
+          description: Inserted
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [ok]
+                properties:
+                  ok: { type: boolean }
+                  measurement:
+                    nullable: true
+                    type: object
+                    additionalProperties: true
+
+  /office/conneqt:
+    post:
+      summary: Staff entry CONNEQT Pulse anchor
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                userId: { type: string, nullable: true }
+                measuredAt: { type: string, format: date-time, nullable: true }
+                device: { type: string, nullable: true }
+                operator: { type: string, nullable: true }
+                conditions: { type: string, nullable: true }
+                quality: { type: string, nullable: true }
+                brachialSystolic: { type: number, nullable: true }
+                brachialDiastolic: { type: number, nullable: true }
+                centralSystolic: { type: number, nullable: true }
+                centralDiastolic: { type: number, nullable: true }
+                heartRate: { type: number, nullable: true }
+                augmentationIndex: { type: number, nullable: true }
+                augmentationPressure: { type: number, nullable: true }
+                pulsePressureAmplification: { type: number, nullable: true }
+                sevr: { type: number, nullable: true }
+                centralPulsePressure: { type: number, nullable: true }
+                arterialAge: { type: number, nullable: true }
+                reportPdfUrl: { type: string, nullable: true }
+      responses:
+        "200":
+          description: Inserted
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [ok]
+                properties:
+                  ok: { type: boolean }
+                  assessment:
+                    nullable: true
+                    type: object
+                    additionalProperties: true
+
+  /office/tanita:
+    post:
+      summary: Staff entry Tanita anchor
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                userId: { type: string, nullable: true }
+                measuredAt: { type: string, format: date-time, nullable: true }
+                device: { type: string, nullable: true }
+                operator: { type: string, nullable: true }
+                conditions: { type: string, nullable: true }
+                quality: { type: string, nullable: true }
+                weightKg: { type: number, nullable: true }
+                bodyFatPct: { type: number, nullable: true }
+                fatMassKg: { type: number, nullable: true }
+                fatFreeMassKg: { type: number, nullable: true }
+                muscleMassKg: { type: number, nullable: true }
+                tbwPct: { type: number, nullable: true }
+                tbwKg: { type: number, nullable: true }
+                visceralFatRating: { type: number, nullable: true }
+                bmrKcal: { type: number, nullable: true }
+                metabolicAge: { type: number, nullable: true }
+      responses:
+        "200":
+          description: Inserted
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [ok]
+                properties:
+                  ok: { type: boolean }
+                  assessment:
+                    nullable: true
+                    type: object
+                    additionalProperties: true
+
+  /office/grip:
+    post:
+      summary: Staff entry grip strength anchor
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                userId: { type: string, nullable: true }
+                measuredAt: { type: string, format: date-time, nullable: true }
+                device: { type: string, nullable: true }
+                operator: { type: string, nullable: true }
+                conditions: { type: string, nullable: true }
+                quality: { type: string, nullable: true }
+                unit: { type: string, nullable: true }
+                leftBest: { type: number, nullable: true }
+                rightBest: { type: number, nullable: true }
+                leftAttempts:
+                  nullable: true
+                  type: array
+                  items: { type: number }
+                rightAttempts:
+                  nullable: true
+                  type: array
+                  items: { type: number }
+                notes: { type: string, nullable: true }
+      responses:
+        "200":
+          description: Inserted
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [ok]
+                properties:
+                  ok: { type: boolean }
+                  assessment:
+                    nullable: true
+                    type: object
+                    additionalProperties: true
+
+  /office/rmr:
+    post:
+      summary: Staff entry RMR anchor
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                userId: { type: string, nullable: true }
+                measuredAt: { type: string, format: date-time, nullable: true }
+                device: { type: string, nullable: true }
+                operator: { type: string, nullable: true }
+                conditions: { type: string, nullable: true }
+                quality: { type: string, nullable: true }
+                rmrKcalDay: { type: number, nullable: true }
+                vo2MlMin: { type: number, nullable: true }
+                vco2MlMin: { type: number, nullable: true }
+                rer: { type: number, nullable: true }
+                steadyStateMinutes: { type: number, nullable: true }
+                protocol: { type: string, nullable: true }
+                notes: { type: string, nullable: true }
+      responses:
+        "200":
+          description: Inserted
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [ok]
+                properties:
+                  ok: { type: boolean }
+                  assessment:
+                    nullable: true
+                    type: object
+                    additionalProperties: true
+
+components:
+  schemas:
+    ResolvedBundle:
+      type: object
+      required:
+        - bundle_day_key
+        - window_days
+        - daily_snapshot_trends
+        - daily_snapshots
+        - latest_anchors
+        - resolved_metrics
+        - resolved_metrics_provenance
+        - confidence
+        - flags
+        - provenance_summary
+        - bundle_hash
+      properties:
+        user_id:
+          type: string
+          nullable: true
+          description: Nullable user_id (UUID string when present)
+        bundle_day_key:
+          type: string
+          example: "2026-01-24"
+        window_days:
+          type: integer
+          example: 28
+
+        daily_snapshot_trends:
+          type: object
+          additionalProperties:
+            $ref: "#/components/schemas/DailySnapshotTrend"
+
+        daily_snapshots:
+          type: array
+          description: Normalized daily_snapshots rows (read-only). May contain extra DB columns.
+          items:
+            $ref: "#/components/schemas/NormalizedDailySnapshot"
+
+        latest_anchors:
+          $ref: "#/components/schemas/LatestAnchors"
+
+        resolved_metrics:
+          type: object
+          additionalProperties:
+            $ref: "#/components/schemas/ResolvedMetric"
+
+        resolved_metrics_provenance:
+          type: object
+          additionalProperties:
+            $ref: "#/components/schemas/ResolvedMetricProvenance"
+
+        derived_metrics:
+          type: object
+          description: Deferred / future use
+          additionalProperties: true
+
+        confidence:
+          $ref: "#/components/schemas/Confidence"
+
+        flags:
+          type: array
+          items:
+            $ref: "#/components/schemas/Flag"
+
+        provenance_summary:
+          $ref: "#/components/schemas/ProvenanceSummary"
+
+        bundle_hash:
+          type: string
+          description: Deterministic hash of Step-2 inputs only (excludes anchors/resolved/confidence/flags/etc.)
+
+    DailySnapshotTrend:
+      type: object
+      required:
+        - baseline_value
+        - latest_value
+        - delta
+        - direction
+        - volatility
+        - trend_strength
+        - coverage_ratio
+        - data_gaps
+        - window_days
+        - points_available
+        - expected_points
+        - start_day_key
+        - end_day_key
+      properties:
+        baseline_value:
+          type: number
+          nullable: true
+        latest_value:
+          type: number
+          nullable: true
+        delta:
+          type: number
+          nullable: true
+        direction:
+          type: string
+          enum: [up, down, stable, insufficient_data]
+        volatility:
+          type: string
+          enum: [low, moderate, high, unknown]
+        trend_strength:
+          type: string
+          enum: [strong, moderate, weak, unknown]
+        coverage_ratio:
+          type: number
+          minimum: 0
+          maximum: 1
+        data_gaps:
+          type: integer
+        window_days:
+          type: integer
+        points_available:
+          type: integer
+        expected_points:
+          type: integer
+        start_day_key:
+          type: string
+          nullable: true
+        end_day_key:
+          type: string
+
+    NormalizedDailySnapshot:
+      type: object
+      required: [day_key]
+      description: >
+        Normalized daily snapshot. Includes canonical fields used by the pipeline.
+        Additional DB columns may be present.
+      additionalProperties: true
+      properties:
+        id:
+          type: string
+          nullable: true
+        user_id:
+          type: string
+          nullable: true
+        snapshot_date:
+          type: string
+          nullable: true
+        created_at:
+          type: string
+          format: date-time
+          nullable: true
+
+        day_key:
+          type: string
+
+        resting_hr:
+          type: number
+          nullable: true
+        hrv:
+          type: number
+          nullable: true
+        sleep_duration:
+          type: number
+          nullable: true
+          description: Sleep duration in hours
+        sleep_efficiency:
+          type: number
+          nullable: true
+        steps:
+          type: number
+          nullable: true
+        activity_minutes:
+          type: number
+          nullable: true
+        respiratory_rate:
+          type: number
+          nullable: true
+        skin_temp_delta:
+          type: number
+          nullable: true
+        blood_oxygen:
+          type: number
+          nullable: true
+        body_fat_pct:
+          type: number
+          nullable: true
+
+    LatestAnchors:
+      type: object
+      description: Latest in-clinic anchors (excluded from bundle_hash)
+      required: [conneqt, tanita, grip, rmr]
+      properties:
+        conneqt:
+          nullable: true
+          type: object
+          additionalProperties: true
+        tanita:
+          nullable: true
+          type: object
+          additionalProperties: true
+        grip:
+          nullable: true
+          type: object
+          additionalProperties: true
+        rmr:
+          nullable: true
+          type: object
+          additionalProperties: true
+
+    ResolvedMetric:
+      type: object
+      required: [value, source, day_key]
+      properties:
+        value:
+          type: number
+          nullable: true
+        source:
+          type: string
+          description: Legacy display source (WEARABLE / ANCHOR_DEVICE)
+        measured_at:
+          type: string
+          format: date-time
+          nullable: true
+        day_key:
+          type: string
+        quality:
+          type: string
+          nullable: true
+        protocol_version:
+          type: string
+          nullable: true
+
+    ResolvedMetricProvenance:
+      type: object
+      required: [metric_key, source, rule, is_null]
+      properties:
+        metric_key:
+          type: string
+        source:
+          type: string
+          enum: [conneqt, tanita, charder, wearable, unknown]
+        rule:
+          type: string
+          enum: [same-day, as-of, unknown]
+        day_key:
+          type: string
+          nullable: true
+        as_of_day_key:
+          type: string
+          nullable: true
+        measured_at:
+          type: string
+          format: date-time
+          nullable: true
+        is_null:
+          type: boolean
+
+    Confidence:
+      type: object
+      required: [overall, trends, resolved]
+      description: >
+        Canonical confidence object.
+        NOTE: confidence.metrics DOES NOT EXIST.
+      properties:
+        overall:
+          $ref: "#/components/schemas/OverallConfidence"
+        trends:
+          type: object
+          additionalProperties:
+            $ref: "#/components/schemas/TrendConfidence"
+        resolved:
+          type: object
+          additionalProperties:
+            $ref: "#/components/schemas/ResolvedMetricConfidence"
+
+    OverallConfidence:
+      type: object
+      required: [score, grade, reasons]
+      properties:
+        score:
+          type: number
+          minimum: 0
+          maximum: 1
+        grade:
+          type: string
+          enum: [high, med, low]
+        reasons:
+          type: array
+          items:
+            type: string
+
+    TrendConfidence:
+      type: object
+      required: [score, reasons, coverage]
+      properties:
+        score:
+          type: number
+          minimum: 0
+          maximum: 1
+        reasons:
+          type: array
+          items:
+            type: string
+        coverage:
+          type: object
+          additionalProperties: true
+
+    ResolvedMetricConfidence:
+      type: object
+      required: [score, reasons, provenance]
+      properties:
+        score:
+          type: number
+          minimum: 0
+          maximum: 1
+        reasons:
+          type: array
+          items:
+            type: string
+        provenance:
+          $ref: "#/components/schemas/ResolvedMetricProvenance"
+
+    Flag:
+      type: object
+      required: [key, severity, message]
+      properties:
+        key:
+          type: string
+        severity:
+          type: string
+          enum: [info, warn, high]
+        message:
+          type: string
+        metric_keys:
+          type: array
+          items:
+            type: string
+        evidence:
+          type: object
+          additionalProperties: true
+
+    ProvenanceSummary:
+      type: object
+      required: [trends, resolved, confidence_overall]
+      properties:
+        trends:
+          type: object
+          required: [median_coverage_ratio, metrics_with_data]
+          properties:
+            median_coverage_ratio:
+              type: number
+              nullable: true
+              minimum: 0
+              maximum: 1
+            metrics_with_data:
+              type: integer
+        resolved:
+          type: object
+          required: [sources, rules, stale_anchor_gt_7d, stale_anchor_gt_30d]
+          properties:
+            sources:
+              type: object
+              additionalProperties:
+                type: integer
+            rules:
+              type: object
+              additionalProperties:
+                type: integer
+            stale_anchor_gt_7d:
+              type: integer
+            stale_anchor_gt_30d:
+              type: integer
+        confidence_overall:
+          nullable: true
+          $ref: "#/components/schemas/OverallConfidence"
+
+    PushRequest:
+      type: object
+      required: [token]
+      properties:
+        token:
+          type: string
+        title:
+          type: string
+          nullable: true
+        body:
+          type: string
+          nullable: true
+        data:
+          nullable: true
+          type: object
+          additionalProperties: true
+        silent:
+          type: boolean
+          nullable: true
+        collapseId:
+          type: string
+          nullable: true
+        priority:
+          type: string
+          nullable: true
+        pushType:
+          type: string
+          nullable: true
+          description: "'alert' | 'background'"
+
+    PushResponse:
+      type: object
+      required: [ok]
+      properties:
+        ok:
+          type: boolean
+        status:
+          type: integer
+          nullable: true
+        apns:
+          nullable: true
+          type: object
+          additionalProperties: true
+        headers:
+          nullable: true
+          type: object
+          additionalProperties: true

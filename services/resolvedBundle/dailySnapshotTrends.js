@@ -81,6 +81,22 @@ function computeTrendStrength(coverage, volatility, direction) {
   return "weak";
 }
 
+/**
+ * Step 2 — Deterministic Daily Snapshot Trends (LOCKED)
+ * Inputs:
+ *   Normalized daily_snapshots only
+ * Rules:
+ *   Baseline = first non-null in window
+ *   Latest   = last non-null in window
+ *   Delta    = latest − baseline (null-safe)
+ *   No imputation
+ *   Missing days allowed
+ *   Anchors explicitly excluded
+ *
+ * Output per metric includes:
+ *   baseline_value, latest_value, delta, direction, volatility, trend_strength,
+ *   coverage_ratio, data_gaps
+ */
 function buildDailySnapshotTrends({ snapshots, bundleDayKey, windowDays }) {
   const trends = {};
   const startDayKey = snapshots.length ? snapshots[0].day_key : bundleDayKey;
@@ -105,21 +121,19 @@ function buildDailySnapshotTrends({ snapshots, bundleDayKey, windowDays }) {
     );
 
     trends[metric] = {
-      window_days: windowDays,
-      points_available: pointsAvailable,
-      expected_points: windowDays,
-      coverage_ratio: coverageRatio,
-      latest_value: latest,
       baseline_value: baseline,
+      latest_value: latest,
       delta,
       direction,
       volatility,
-      trend_strength: computeTrendStrength(
-        coverageRatio,
-        volatility,
-        direction
-      ),
-      data_gaps: windowDays - pointsAvailable,
+      trend_strength: computeTrendStrength(coverageRatio, volatility, direction),
+      coverage_ratio: coverageRatio,
+      data_gaps: Math.max(0, windowDays - pointsAvailable),
+
+      // Keep existing fields for backwards compatibility / debugging
+      window_days: windowDays,
+      points_available: pointsAvailable,
+      expected_points: windowDays,
       start_day_key: startDayKey,
       end_day_key: bundleDayKey,
     };

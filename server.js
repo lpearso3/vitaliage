@@ -49,6 +49,40 @@ function endOfDayUtc(isoOrDate) {
   ).toISOString();
 }
 
+// --- Integration hygiene guards ---
+// Canon: confidence.metrics MUST NOT exist. Only confidence.overall/trends/resolved are allowed.
+function validateBundleShape(bundle) {
+  const conf = bundle?.confidence;
+
+  if (!conf || typeof conf !== "object") {
+    return { ok: false, error: "Invalid bundle shape: missing confidence object." };
+  }
+
+  // Explicitly forbid confidence.metrics (legacy)
+  if (Object.prototype.hasOwnProperty.call(conf, "metrics")) {
+    return {
+      ok: false,
+      error:
+        "Invalid bundle shape: confidence.metrics is not allowed. Use confidence.trends and confidence.resolved only.",
+    };
+  }
+
+  // Require canonical keys
+  const hasOverall = Object.prototype.hasOwnProperty.call(conf, "overall");
+  const hasTrends = Object.prototype.hasOwnProperty.call(conf, "trends");
+  const hasResolved = Object.prototype.hasOwnProperty.call(conf, "resolved");
+
+  if (!hasOverall || !hasTrends || !hasResolved) {
+    return {
+      ok: false,
+      error:
+        "Invalid bundle shape: confidence must include overall, trends, and resolved.",
+    };
+  }
+
+  return { ok: true };
+}
+
 // --- Supabase client ---
 // Prefer SUPABASE_SERVICE_ROLE_KEY (canon). Fallback to older names so you don't get blocked.
 const supabaseKey =
@@ -86,11 +120,16 @@ app.get("/resolved-bundle", async (req, res) => {
     }
 
     const bundle = await buildResolvedBundle({
-      supabase, // ✅ required so builder can fetch latest anchors
+      supabase, // required so builder can fetch latest anchors
       userId,
       bundleDayKey: dayKey,
       windowDays,
     });
+
+    const shape = validateBundleShape(bundle);
+    if (!shape.ok) {
+      return res.status(500).json({ ok: false, error: shape.error });
+    }
 
     return res.json({ ok: true, bundle });
   } catch (err) {
@@ -810,7 +849,10 @@ app.post("/office/rmr", async (req, res) => {
 // STATIC + DASHBOARD SPA (MUST BE AFTER API ROUTES)
 // -------------------------------------------------------
 app.use(express.static(path.join(__dirname, "public")));
-app.use("/dashboard", express.static(path.join(__dirname, "public", "dashboard")));
+app.use(
+  "/dashboard",
+  express.static(path.join(__dirname, "public", "dashboard"))
+);
 app.get(/^\/dashboard(\/.*)?$/, (_req, res) => {
   res.sendFile(path.join(__dirname, "public", "dashboard", "index.html"));
 });

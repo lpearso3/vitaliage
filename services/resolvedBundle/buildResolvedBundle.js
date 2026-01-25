@@ -1,7 +1,12 @@
 // services/resolvedBundle/buildResolvedBundle.js
 const crypto = require("crypto");
+
 const { buildDailySnapshotTrends } = require("./dailySnapshotTrends");
 const { buildResolvedMetrics } = require("./resolvedMetrics");
+const { normalizeDailySnapshot } = require("./normalizeDailySnapshot");
+const { computeConfidence } = require("./confidence/computeConfidence");
+const { buildProvenanceSummary } = require("./provenanceSummary");
+const { buildFlags } = require("./flags/buildFlags");
 
 /**
  * Deterministic JSON stringify with stable key ordering.
@@ -26,19 +31,54 @@ function sha256Hex(input) {
 }
 
 /**
+ * Deterministically dedupe multiple daily_snapshots rows for the same day_key.
+ * Rule: keep latest created_at; tie-break by id.
+ * Returns rows sorted by day_key ASC.
+ */
+function dedupeDailySnapshotsByDayKey(rows) {
+  const bestByDay = new Map();
+
+  for (const r of rows || []) {
+    const day = r?.day_key;
+    if (!day) continue;
+
+    const prev = bestByDay.get(day);
+    if (!prev) {
+      bestByDay.set(day, r);
+      continue;
+    }
+
+    const tPrev = Date.parse(prev.created_at || "") || -Infinity;
+    const tCurr = Date.parse(r.created_at || "") || -Infinity;
+
+    if (tCurr > tPrev) {
+      bestByDay.set(day, r);
+    } else if (tCurr === tPrev) {
+      const a = String(prev.id || "");
+      const b = String(r.id || "");
+      if (b > a) bestByDay.set(day, r);
+    }
+  }
+
+  return Array.from(bestByDay.values()).sort((a, b) =>
+    String(a.day_key).localeCompare(String(b.day_key))
+  );
+}
+
+/**
  * buildResolvedBundle({ supabase, userId, bundleDayKey, windowDays })
  * Returns the canonical ResolvedBundle shape.
  *
- * v1 baseline: includes latest_anchors (conneqt, tanita, grip, rmr) using "latest wins".
- * Step 2: populates daily_snapshot_trends deterministically from immutable daily_snapshots only.
+ * Canon:
+ * - Step 1: raw inputs from daily_snapshots table (immutable)
+ * - Step 1.5: normalization (in-memory only)
+ * - Step 2: deterministic trends from normalized snapshots (hashed)
+ * - Step 3: resolved_metrics + provenance (excluded from hash)
+ * - confidence, flags, provenance_summary are excluded from hash
  *
- * Step 2 bundle_hash canon:
- * - MUST change when: bundle_day_key, window_days, or any daily_snapshot in-window changes
- * - MUST NOT include: anchors, interpretation, confidence, AI outputs
- *
- * Step 3 bundle_hash canon:
- * - MUST include: Step 2 inputs + any resolved_metrics included
- * - MUST NOT include: anchors, interpretation, confidence, AI outputs
+ * Hygiene audit:
+ * - This file must never reference confidence.metrics.
+ * - Only confidence.overall / confidence.trends / confidence.resolved are valid.
  */
 async function buildResolvedBundle({
   supabase,
@@ -72,7 +112,7 @@ async function buildResolvedBundle({
       .order("measured_at", { ascending: false })
       .limit(1);
 
-    // user_id is nullable in your schema; only filter if userId provided
+    // user_id is nullable; only filter if userId provided
     if (userId) q = q.eq("user_id", userId);
 
     const { data, error } = await q;
@@ -102,15 +142,35 @@ async function buildResolvedBundle({
     return data || [];
   }
 
+  async function latestUpToDay(table, selectCols, dayKey) {
+    let q = supabase
+      .from(table)
+      .select(selectCols)
+      .lte("day_key", dayKey)
+      .order("day_key", { ascending: false })
+      .order("measured_at", { ascending: false })
+      .limit(1);
+
+    if (userId) q = q.eq("user_id", userId);
+
+    const { data, error } = await q;
+    if (error) {
+      throw new Error(
+        `latestUpToDay ${table} failed: ${error.message || error.code}`
+      );
+    }
+    return data?.[0] || null;
+  }
+
   // --- Step 2: daily_snapshots selection (locked rules) ---
   const startExclusive = subtractDays(bundleDayKey, window_days);
 
   let dsQuery = supabase
     .from("daily_snapshots")
     .select("*")
-    .lte("day_key", bundleDayKey)
-    .gt("day_key", startExclusive)
-    .order("day_key", { ascending: true });
+    .lte("snapshot_date", bundleDayKey)
+    .gt("snapshot_date", startExclusive)
+    .order("snapshot_date", { ascending: true });
 
   if (userId) dsQuery = dsQuery.eq("user_id", userId);
 
@@ -121,7 +181,10 @@ async function buildResolvedBundle({
     );
   }
 
-  const snapshots = dailySnapshots || [];
+  // Normalize -> dedupe: deterministically enforce "one snapshot per day_key"
+  const snapshots = dedupeDailySnapshotsByDayKey(
+    (dailySnapshots || []).map(normalizeDailySnapshot)
+  );
 
   const daily_snapshot_trends = buildDailySnapshotTrends({
     snapshots,
@@ -130,7 +193,7 @@ async function buildResolvedBundle({
   });
   // --- end Step 2 ---
 
-  // Anchors (v1 baseline) — excluded from Step 2 trend calc and excluded from Step 2 hash
+  // Anchors (v1 baseline) — excluded from Step 2 trend calc and excluded from hash
   const [conneqt, tanita, grip, rmr] = await Promise.all([
     latestFrom(
       "conneqt_assessments",
@@ -150,45 +213,85 @@ async function buildResolvedBundle({
     ),
   ]);
 
-  // --- Step 3: precedence-aware resolution (same-day anchors only, v1) ---
+  // --- Step 3: precedence-aware resolution ---
   const dailySnapshotForDay =
     snapshots.find((s) => s.day_key === bundleDayKey) || null;
 
-  const [sameDayConneqt, sameDayTanita] = await Promise.all([
+  const [sameDayConneqt, asOfTanita] = await Promise.all([
     allForDay(
       "conneqt_assessments",
       "id,user_id,measured_at,day_key,quality,device,brachial_systolic,brachial_diastolic,heart_rate,raw_json",
       bundleDayKey
     ),
-    allForDay(
+    latestUpToDay(
       "tanita_assessments",
       "id,user_id,measured_at,day_key,quality,device,weight_kg,body_fat_pct,raw_json",
       bundleDayKey
     ),
   ]);
 
-  const resolved_metrics = buildResolvedMetrics({
+  const step3 = buildResolvedMetrics({
     bundleDayKey,
     dailySnapshotForDay,
-    sameDay: {
-      conneqt: sameDayConneqt,
-      tanita: sameDayTanita,
-    },
+    sameDay: { conneqt: sameDayConneqt },
+    asOf: { tanita: asOfTanita ? [asOfTanita] : [] },
   });
+
+  const resolved_metrics = step3?.resolved_metrics || {};
+  const resolved_metrics_provenance = step3?.resolved_metrics_provenance || {};
   // --- end Step 3 ---
+
+  // Confidence (excluded from hash)
+  const confidence = computeConfidence({
+    bundleDayKey,
+    windowDays: window_days,
+    dailySnapshotTrends: daily_snapshot_trends,
+    resolvedMetrics: resolved_metrics,
+    resolvedMetricsProvenance: resolved_metrics_provenance,
+  });
+
+  // Enforce confidence shape and prevent any downstream usage of confidence.metrics
+  if (!confidence || typeof confidence !== "object") {
+    throw new Error("computeConfidence returned invalid confidence object");
+  }
+  if (Object.prototype.hasOwnProperty.call(confidence, "metrics")) {
+    throw new Error(
+      "Invalid confidence shape: confidence.metrics is not allowed. Use confidence.trends and confidence.resolved."
+    );
+  }
+  if (!confidence.overall || !confidence.trends || !confidence.resolved) {
+    throw new Error(
+      "Invalid confidence shape: confidence must include overall, trends, and resolved"
+    );
+  }
+
+  // Provenance summary (excluded from hash)
+  const provenance_summary = buildProvenanceSummary({
+    dailySnapshotTrends: daily_snapshot_trends,
+    resolvedMetricsProvenance: resolved_metrics_provenance,
+    confidence,
+  });
+
+  // Flags (excluded from hash)
+  const flags = buildFlags({
+    bundleDayKey,
+    dailySnapshotTrends: daily_snapshot_trends,
+    resolvedMetricsProvenance: resolved_metrics_provenance,
+    confidence,
+  });
 
   const baseBundle = {
     user_id: userId,
     bundle_day_key: bundleDayKey,
     window_days,
 
-    // Step 2 output (locked shape)
+    // Step 2 output (hashed inputs only; trends themselves are not directly hashed)
     daily_snapshot_trends,
 
-    // Returning snapshots is allowed; authority is still the table; no mutation occurs
+    // normalized, read-only
     daily_snapshots: snapshots,
 
-    // v1 baseline anchors (explicitly excluded from Step 2 trend calc + hash)
+    // anchors (excluded from hash)
     latest_anchors: {
       conneqt,
       tanita,
@@ -196,17 +299,18 @@ async function buildResolvedBundle({
       rmr,
     },
 
-    // Step 3 output (present only when resolution occurs)
-    ...(resolved_metrics ? { resolved_metrics } : {}),
+    // Step 3 (excluded from hash)
+    resolved_metrics,
+    resolved_metrics_provenance,
 
-    // Placeholders (unchanged)
+    // Placeholders / downstream-only (excluded from hash)
     derived_metrics: {},
-    confidence: {},
-    flags: [],
-    provenance_summary: {},
+    confidence,
+    flags,
+    provenance_summary,
   };
 
-  // Step 2 canonical hash payload (anchors excluded) + Step 3 resolved_metrics when present
+  // Step 2 canonical hash payload (anchors + resolved_metrics + confidence + flags + summaries excluded).
   const hashPayload = {
     bundle_day_key: bundleDayKey,
     window_days,
@@ -214,7 +318,7 @@ async function buildResolvedBundle({
       id: s.id,
       day_key: s.day_key,
 
-      // Step 2 metrics in-scope (nullable, vendor-agnostic)
+      // Canonical Step 2 keys
       resting_hr: s.resting_hr ?? null,
       hrv: s.hrv ?? null,
       sleep_duration: s.sleep_duration ?? null,
@@ -225,7 +329,6 @@ async function buildResolvedBundle({
       skin_temp_delta: s.skin_temp_delta ?? null,
       blood_oxygen: s.blood_oxygen ?? null,
     })),
-    ...(resolved_metrics ? { resolved_metrics } : {}),
   };
 
   const bundle_hash = sha256Hex(stableStringify(hashPayload));
