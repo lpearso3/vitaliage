@@ -230,6 +230,7 @@ app.get("/db-check", async (_req, res) => {
 // =======================================================
 // WEARABLE DAILY SNAPSHOT INGEST (iOS / Android / Oura / Garmin)
 // Table: daily_snapshots
+// NOTE: Supabase schema uses snapshot_date (timestamptz). There is NO day_key column.
 // =======================================================
 app.post("/snapshot", async (req, res) => {
   try {
@@ -240,16 +241,19 @@ app.post("/snapshot", async (req, res) => {
       ? body.userId || body.user_id
       : null;
 
-    const snapshotDateIso = toIsoOrNull(body.date || body.snapshot_date) || new Date().toISOString();
-    const dk = dayKeyUtc(snapshotDateIso);
-    if (!dk) {
+    // Canonical storage column is snapshot_date (TIMESTAMPTZ)
+    const snapshotDateIso =
+      toIsoOrNull(body.date || body.snapshot_date || body.snapshotDate) ||
+      new Date().toISOString();
+
+    const snapshotDate = new Date(snapshotDateIso);
+    if (isNaN(snapshotDate.getTime())) {
       return res.status(400).json({ ok: false, error: "invalid_date" });
     }
 
     const payload = {
       user_id: cleanUserId,
-      snapshot_date: snapshotDateIso,
-      day_key: dk,
+      snapshot_date: snapshotDate.toISOString(),
 
       steps: body.steps ?? null,
       resting_hr: body.restingHR ?? body.resting_hr ?? null,
@@ -261,7 +265,8 @@ app.post("/snapshot", async (req, res) => {
       bp_diastolic: body.bpDiastolic ?? body.bp_diastolic ?? null,
 
       // Sleep summary (optional)
-      sleep_total_minutes: body.sleep?.totalMinutes ?? body.sleep_total_minutes ?? null,
+      sleep_total_minutes:
+        body.sleep?.totalMinutes ?? body.sleep_total_minutes ?? null,
       sleep_goal_minutes: body.sleep?.goalMinutes ?? body.sleep_goal_minutes ?? null,
       sleep_met_goal: body.sleep?.metGoal ?? body.sleep_met_goal ?? null,
 
@@ -294,7 +299,14 @@ app.post("/snapshot", async (req, res) => {
       payload.bp_systolic != null ||
       payload.bp_diastolic != null ||
       payload.sleep_total_minutes != null ||
-      payload.weight_kg != null;
+      payload.weight_kg != null ||
+      payload.body_fat_percent != null ||
+      payload.waist_cm != null ||
+      payload.calories_in != null ||
+      payload.protein_g != null ||
+      payload.carb_g != null ||
+      payload.fat_g != null ||
+      payload.hydration_ml != null;
 
     if (!hasAny) {
       return res.status(400).json({
