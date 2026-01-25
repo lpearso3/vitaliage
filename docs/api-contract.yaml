@@ -1,7 +1,7 @@
 openapi: 3.0.3
 info:
   title: Vitaliage ResolvedBundle API
-  version: "1.0.2"
+  version: "1.0.3"
   description: >
     Canonical backend API for Vitaliage clinical intelligence.
     All downstream consumers MUST rely on ResolvedBundle only.
@@ -141,6 +141,151 @@ paths:
                     example: true
                   bundle:
                     $ref: "#/components/schemas/ResolvedBundle"
+        "400":
+          description: Bad request
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [ok, error]
+                properties:
+                  ok:
+                    type: boolean
+                    example: false
+                  error:
+                    type: string
+        "500":
+          description: Server error
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [ok, error]
+                properties:
+                  ok:
+                    type: boolean
+                    example: false
+                  error:
+                    type: string
+
+  /daily-snapshots:
+    post:
+      summary: Upload wearable daily snapshot (canonical)
+      description: >
+        Ingests a wearable-origin daily snapshot row used by the pipeline to power
+        trends/readiness and ultimately the ResolvedBundle. In-office measurements
+        MUST use /office/* endpoints instead.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/DailySnapshotIn"
+            examples:
+              example:
+                value:
+                  userId: null
+                  snapshot_date: "2026-01-25T16:44:00Z"
+                  steps: 5234
+                  resting_hr: 56
+                  hrv: 48
+                  sleep_duration: 7.1
+                  respiratory_rate: 14.2
+                  blood_oxygen: 98
+                  source: "apple_health"
+                  device: "iPhone"
+      responses:
+        "200":
+          description: Inserted / upserted
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [ok]
+                properties:
+                  ok:
+                    type: boolean
+                    example: true
+                  snapshot:
+                    nullable: true
+                    type: object
+                    additionalProperties: true
+        "400":
+          description: Bad request
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [ok, error]
+                properties:
+                  ok:
+                    type: boolean
+                    example: false
+                  error:
+                    type: string
+        "500":
+          description: Server error
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [ok, error]
+                properties:
+                  ok:
+                    type: boolean
+                    example: false
+                  error:
+                    type: string
+
+  /daily-snapshots:
+    get:
+      summary: List wearable daily snapshots
+      description: >
+        Returns the most recent wearable daily snapshots. Primarily for debugging
+        and admin; downstream consumers should use /resolved-bundle.
+      parameters:
+        - in: query
+          name: userId
+          required: false
+          schema:
+            type: string
+            nullable: true
+        - in: query
+          name: from
+          required: false
+          schema:
+            type: string
+            format: date-time
+            nullable: true
+        - in: query
+          name: to
+          required: false
+          schema:
+            type: string
+            format: date-time
+            nullable: true
+        - in: query
+          name: limit
+          required: false
+          schema:
+            type: integer
+            default: 28
+      responses:
+        "200":
+          description: Snapshots
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [ok, snapshots]
+                properties:
+                  ok:
+                    type: boolean
+                    example: true
+                  snapshots:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/NormalizedDailySnapshot"
         "400":
           description: Bad request
           content:
