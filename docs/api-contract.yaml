@@ -1,7 +1,7 @@
 openapi: 3.0.3
 info:
   title: Vitaliage ResolvedBundle API
-  version: "1.0.1"
+  version: "1.0.2"
   description: >
     Canonical backend API for Vitaliage clinical intelligence.
     All downstream consumers MUST rely on ResolvedBundle only.
@@ -566,9 +566,7 @@ components:
             $ref: "#/components/schemas/ResolvedMetricProvenance"
 
         derived_metrics:
-          type: object
-          description: Deferred / future use
-          additionalProperties: true
+          $ref: "#/components/schemas/DerivedMetrics"
 
         confidence:
           $ref: "#/components/schemas/Confidence"
@@ -584,6 +582,82 @@ components:
         bundle_hash:
           type: string
           description: Deterministic hash of Step-2 inputs only (excludes anchors/resolved/confidence/flags/etc.)
+
+    DerivedMetrics:
+      type: object
+      description: Canonical derived metrics (computed from wearable snapshots only; excluded from bundle_hash)
+      required: [readiness]
+      additionalProperties: true
+      properties:
+        readiness:
+          $ref: "#/components/schemas/Readiness"
+
+    Readiness:
+      type: object
+      required: [score, state, reasons, components, readinessScore, stepsAvg]
+      properties:
+        score:
+          type: integer
+          minimum: 0
+          maximum: 100
+        state:
+          type: string
+          enum: [ready, easy, rest]
+        reasons:
+          type: array
+          items:
+            type: string
+        components:
+          type: object
+          required:
+            - sleepScore
+            - hrvScore
+            - rhrScore
+            - stepsScore
+            - sleep7DayAdherence
+            - nightsMeetingGoal
+            - hrvDeltaPct
+            - rhrDelta
+            - stepsAvg
+          properties:
+            sleepScore:
+              type: integer
+              minimum: 0
+              maximum: 100
+            hrvScore:
+              type: integer
+              minimum: 0
+              maximum: 100
+            rhrScore:
+              type: integer
+              minimum: 0
+              maximum: 100
+            stepsScore:
+              type: integer
+              minimum: 0
+              maximum: 100
+            sleep7DayAdherence:
+              type: number
+              nullable: true
+            nightsMeetingGoal:
+              type: integer
+              nullable: true
+            hrvDeltaPct:
+              type: number
+              nullable: true
+            rhrDelta:
+              type: number
+              nullable: true
+            stepsAvg:
+              type: number
+              nullable: true
+        readinessScore:
+          type: integer
+          minimum: 0
+          maximum: 100
+        stepsAvg:
+          type: number
+          nullable: true
 
     DailySnapshotTrend:
       type: object
@@ -805,8 +879,8 @@ components:
       properties:
         score:
           type: number
-          minimum: 0
-          maximum: 1
+         minimum: 0
+         maximum: 1
         reasons:
           type: array
           items:

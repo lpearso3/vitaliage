@@ -7,6 +7,9 @@ const { normalizeDailySnapshot } = require("./normalizeDailySnapshot");
 const { computeConfidence } = require("./confidence/computeConfidence");
 const { buildProvenanceSummary } = require("./provenanceSummary");
 const { buildFlags } = require("./flags/buildFlags");
+const {
+  computeReadinessFromSnapshots,
+} = require("./readiness/computeReadinessFromSnapshots");
 
 /**
  * Deterministic JSON stringify with stable key ordering.
@@ -193,6 +196,9 @@ async function buildResolvedBundle({
   });
   // --- end Step 2 ---
 
+  // Derived metrics (wearable-only; excluded from bundle_hash)
+  const readiness = computeReadinessFromSnapshots(snapshots);
+
   // Anchors (v1 baseline) — excluded from Step 2 trend calc and excluded from hash
   const [conneqt, tanita, grip, rmr] = await Promise.all([
     latestFrom(
@@ -303,8 +309,11 @@ async function buildResolvedBundle({
     resolved_metrics,
     resolved_metrics_provenance,
 
-    // Placeholders / downstream-only (excluded from hash)
-    derived_metrics: {},
+    // Canonical derived metrics (excluded from hash)
+    derived_metrics: {
+      readiness,
+    },
+
     confidence,
     flags,
     provenance_summary,
