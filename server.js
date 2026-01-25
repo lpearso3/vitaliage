@@ -51,8 +51,58 @@ function endOfDayUtc(isoOrDate) {
 
 // --- Integration hygiene guards ---
 // Canon: confidence.metrics MUST NOT exist. Only confidence.overall/trends/resolved are allowed.
+// Also assert required top-level ResolvedBundle keys exist (lightweight runtime contract validation).
+
+const REQUIRED_BUNDLE_KEYS = [
+  "user_id",
+  "bundle_day_key",
+  "window_days",
+  "daily_snapshot_trends",
+  "daily_snapshots",
+  "latest_anchors",
+  "resolved_metrics",
+  "resolved_metrics_provenance",
+  "derived_metrics",
+  "confidence",
+  "flags",
+  "provenance_summary",
+  "bundle_hash",
+];
+
+function hasDeepKey(obj, targetKey) {
+  if (!obj || typeof obj !== "object") return false;
+  if (Object.prototype.hasOwnProperty.call(obj, targetKey)) return true;
+  for (const v of Object.values(obj)) {
+    if (hasDeepKey(v, targetKey)) return true;
+  }
+  return false;
+}
+
 function validateBundleShape(bundle) {
-  const conf = bundle?.confidence;
+  if (!bundle || typeof bundle !== "object") {
+    return { ok: false, error: "Invalid bundle shape: bundle must be an object." };
+  }
+
+  // Required top-level keys (canonical ResolvedBundle)
+  const missing = REQUIRED_BUNDLE_KEYS.filter(
+    (k) => !Object.prototype.hasOwnProperty.call(bundle, k)
+  );
+  if (missing.length) {
+    return {
+      ok: false,
+      error: `Invalid bundle shape: missing required keys: ${missing.join(", ")}`,
+    };
+  }
+
+  // bundle_hash must be a non-empty string
+  if (typeof bundle.bundle_hash !== "string" || bundle.bundle_hash.length === 0) {
+    return {
+      ok: false,
+      error: "Invalid bundle shape: bundle_hash must be a non-empty string.",
+    };
+  }
+
+  const conf = bundle.confidence;
 
   if (!conf || typeof conf !== "object") {
     return { ok: false, error: "Invalid bundle shape: missing confidence object." };
@@ -63,7 +113,16 @@ function validateBundleShape(bundle) {
     return {
       ok: false,
       error:
-        "Invalid bundle shape: confidence.metrics is not allowed. Use confidence.trends and confidence.resolved only.",
+        "Invalid bundle shape: confidence.metrics is not allowed. Use confidence.overall, confidence.trends, and confidence.resolved only.",
+    };
+  }
+
+  // Defensive: catch any nested "metrics" key anywhere inside confidence
+  if (hasDeepKey(conf, "metrics")) {
+    return {
+      ok: false,
+      error:
+        "Invalid bundle shape: confidence.metrics-like key detected inside confidence (forbidden).",
     };
   }
 
@@ -133,9 +192,9 @@ app.get("/resolved-bundle", async (req, res) => {
 
     return res.json({ ok: true, bundle });
   } catch (err) {
-    return res.status(400).json({
+    return res.status(500).json({
       ok: false,
-      error: err.message || "Bad Request",
+      error: err.message || "Internal Server Error",
     });
   }
 });
