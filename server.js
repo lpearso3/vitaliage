@@ -166,9 +166,10 @@ app.get("/docs/api-contract.yaml", (_req, res) => {
 });
 
 // --- Resolved Bundle ---
+// NOW REQUIRES userId (prevents global/null-user mixing)
 app.get("/resolved-bundle", async (req, res) => {
   try {
-    const userId = req.query.userId ?? null;
+    const userIdRaw = req.query.userId ?? req.query.user_id ?? null;
     const dayKey = req.query.dayKey;
     const windowDays = req.query.windowDays ? Number(req.query.windowDays) : 28;
 
@@ -178,6 +179,17 @@ app.get("/resolved-bundle", async (req, res) => {
         error: "Missing required query param: dayKey (YYYY-MM-DD)",
       });
     }
+
+    if (!userIdRaw || !uuidRegex.test(String(userIdRaw))) {
+      return res.status(400).json({
+        ok: false,
+        error: "missing_or_invalid_userId",
+        message:
+          "Provide a valid userId (UUID) as query param: ?userId=xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx",
+      });
+    }
+
+    const userId = String(userIdRaw);
 
     const bundle = await buildResolvedBundle({
       supabase,
@@ -220,6 +232,7 @@ app.get("/db-check", async (_req, res) => {
 // Endpoint: POST /snapshot
 // Table: daily_snapshots
 //
+// NOW REQUIRES userId (UUID) to prevent global/null-user mixing.
 // IMPORTANT: Match Supabase schema exactly.
 // - Uses snapshot_date (timestamptz)
 // - DOES NOT write: day_key, source, device
@@ -229,9 +242,16 @@ app.post("/snapshot", async (req, res) => {
   try {
     const body = req.body || {};
 
-    const cleanUserId = uuidRegex.test(body.userId || body.user_id || "")
-      ? body.userId || body.user_id
-      : null;
+    const userIdRaw = body.userId || body.user_id || null;
+    if (!userIdRaw || !uuidRegex.test(String(userIdRaw))) {
+      return res.status(400).json({
+        ok: false,
+        error: "missing_or_invalid_userId",
+        message:
+          "Provide a valid userId (UUID) in JSON body: { userId: \"...\" }",
+      });
+    }
+    const cleanUserId = String(userIdRaw);
 
     const snapshotDateIso =
       toIsoOrNull(body.date || body.snapshot_date || body.snapshotDate) ||
@@ -333,6 +353,7 @@ app.post("/devices", async (req, res) => {
   const { userId, platform = "ios", token } = req.body || {};
   if (!token) return res.status(400).json({ error: "Missing token" });
 
+  // keep nullable for now (device tokens can arrive before user is known)
   const cleanUserId = uuidRegex.test(userId || "") ? userId : null;
 
   try {
@@ -518,6 +539,7 @@ app.post("/office/measurements", async (req, res) => {
       quality,
     } = payload;
 
+    // keep nullable for now (staff workflows may not have user bound yet)
     const cleanUserId = uuidRegex.test(userId || "") ? userId : null;
 
     const tsIso = toIsoOrNull(measuredAt) || new Date().toISOString();
@@ -629,6 +651,7 @@ app.post("/office/conneqt", async (req, res) => {
       reportPdfUrl,
     } = payload;
 
+    // keep nullable for now
     const cleanUserId = uuidRegex.test(userId || "") ? userId : null;
 
     const tsIso = toIsoOrNull(measuredAt) || new Date().toISOString();
@@ -758,6 +781,7 @@ app.post("/office/tanita", async (req, res) => {
       metabolicAge,
     } = payload;
 
+    // keep nullable for now
     const cleanUserId = uuidRegex.test(userId || "") ? userId : null;
 
     const tsIso = toIsoOrNull(measuredAt) || new Date().toISOString();
@@ -858,7 +882,9 @@ app.post("/office/grip", async (req, res) => {
       notes,
     } = payload;
 
+    // keep nullable for now
     const cleanUserId = uuidRegex.test(userId || "") ? userId : null;
+
     const tsIso = toIsoOrNull(measuredAt) || new Date().toISOString();
     const dk = dayKeyUtc(tsIso);
     if (!dk)
@@ -949,7 +975,9 @@ app.post("/office/rmr", async (req, res) => {
       notes,
     } = payload;
 
+    // keep nullable for now
     const cleanUserId = uuidRegex.test(userId || "") ? userId : null;
+
     const tsIso = toIsoOrNull(measuredAt) || new Date().toISOString();
     const dk = dayKeyUtc(tsIso);
     if (!dk)
