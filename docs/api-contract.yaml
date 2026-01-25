@@ -594,7 +594,8 @@ components:
 
     Readiness:
       type: object
-      required: [score, state, reasons, components, readinessScore, stepsAvg]
+      description: Wearable-only readiness (excluded from bundle_hash)
+      required: [score, state, reasons, components]
       properties:
         score:
           type: integer
@@ -651,13 +652,10 @@ components:
             stepsAvg:
               type: number
               nullable: true
-        readinessScore:
-          type: integer
-          minimum: 0
-          maximum: 100
         stepsAvg:
           type: number
           nullable: true
+          description: Convenience top-level echo of components.stepsAvg (if present)
 
     DailySnapshotTrend:
       type: object
@@ -879,8 +877,8 @@ components:
       properties:
         score:
           type: number
-         minimum: 0
-         maximum: 1
+          minimum: 0
+          maximum: 1
         reasons:
           type: array
           items:
