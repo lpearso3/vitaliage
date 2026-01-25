@@ -270,10 +270,7 @@ app.post("/snapshot", async (req, res) => {
       sleep_goal_minutes: body.sleep?.goalMinutes ?? body.sleep_goal_minutes ?? null,
       sleep_met_goal: body.sleep?.metGoal ?? body.sleep_met_goal ?? null,
 
-      // Source metadata (optional)
-      source: body.source ?? null,
   
-
       // Body & nutrition (optional)
       weight_kg: body.weightKg ?? body.weight_kg ?? null,
       body_fat_percent: body.bodyFatPercent ?? body.body_fat_percent ?? null,
