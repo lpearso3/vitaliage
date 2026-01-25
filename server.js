@@ -272,7 +272,7 @@ app.post("/snapshot", async (req, res) => {
 
       // Source metadata (optional)
       source: body.source ?? null,
-      device: body.device ?? null,
+  
 
       // Body & nutrition (optional)
       weight_kg: body.weightKg ?? body.weight_kg ?? null,
