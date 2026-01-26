@@ -6,7 +6,9 @@ const path = require("path");
 require("dotenv").config();
 const { sendPush } = require("./apns");
 
-const { buildResolvedBundle } = require("./services/resolvedBundle/buildResolvedBundle");
+const {
+  buildResolvedBundle,
+} = require("./services/resolvedBundle/buildResolvedBundle");
 
 const app = express();
 app.set("trust proxy", 1);
@@ -75,7 +77,10 @@ function hasDeepKey(obj, targetKey) {
 
 function validateBundleShape(bundle) {
   if (!bundle || typeof bundle !== "object") {
-    return { ok: false, error: "Invalid bundle shape: bundle must be an object." };
+    return {
+      ok: false,
+      error: "Invalid bundle shape: bundle must be an object.",
+    };
   }
 
   const missing = REQUIRED_BUNDLE_KEYS.filter(
@@ -88,7 +93,10 @@ function validateBundleShape(bundle) {
     };
   }
 
-  if (typeof bundle.bundle_hash !== "string" || bundle.bundle_hash.length === 0) {
+  if (
+    typeof bundle.bundle_hash !== "string" ||
+    bundle.bundle_hash.length === 0
+  ) {
     return {
       ok: false,
       error: "Invalid bundle shape: bundle_hash must be a non-empty string.",
@@ -97,7 +105,10 @@ function validateBundleShape(bundle) {
 
   const conf = bundle.confidence;
   if (!conf || typeof conf !== "object") {
-    return { ok: false, error: "Invalid bundle shape: missing confidence object." };
+    return {
+      ok: false,
+      error: "Invalid bundle shape: missing confidence object.",
+    };
   }
 
   if (Object.prototype.hasOwnProperty.call(conf, "metrics")) {
@@ -129,6 +140,20 @@ function validateBundleShape(bundle) {
   }
 
   return { ok: true };
+}
+
+/**
+ * Identity canon (CURRENT STATE):
+ * - Your iOS "stable device UUID" is treated as the app's userId for now.
+ * - daily_snapshots.user_id uses that UUID (so buildResolvedBundle works today).
+ * - devices.user_id MUST remain NULL because it has an FK (likely to auth.users).
+ *   If you write iOS UUID into devices.user_id, it will 500 with devices_user_id_fkey.
+ */
+function getAppUserIdFromAny(obj) {
+  const raw = obj?.userId ?? obj?.user_id ?? null;
+  if (!raw) return null;
+  const s = String(raw);
+  return uuidRegex.test(s) ? s : null;
 }
 
 // --- Supabase client ---
@@ -166,10 +191,10 @@ app.get("/docs/api-contract.yaml", (_req, res) => {
 });
 
 // --- Resolved Bundle ---
-// NOW REQUIRES userId (prevents global/null-user mixing)
+// Requires userId (the app's stable UUID) so we never mix global/null-user data.
 app.get("/resolved-bundle", async (req, res) => {
   try {
-    const userIdRaw = req.query.userId ?? req.query.user_id ?? null;
+    const userId = getAppUserIdFromAny(req.query);
     const dayKey = req.query.dayKey;
     const windowDays = req.query.windowDays ? Number(req.query.windowDays) : 28;
 
@@ -180,7 +205,7 @@ app.get("/resolved-bundle", async (req, res) => {
       });
     }
 
-    if (!userIdRaw || !uuidRegex.test(String(userIdRaw))) {
+    if (!userId) {
       return res.status(400).json({
         ok: false,
         error: "missing_or_invalid_userId",
@@ -189,11 +214,9 @@ app.get("/resolved-bundle", async (req, res) => {
       });
     }
 
-    const userId = String(userIdRaw);
-
     const bundle = await buildResolvedBundle({
       supabase,
-      userId,
+      userId, // IMPORTANT: this is the app UUID stored in daily_snapshots.user_id
       bundleDayKey: dayKey,
       windowDays,
     });
@@ -232,7 +255,7 @@ app.get("/db-check", async (_req, res) => {
 // Endpoint: POST /snapshot
 // Table: daily_snapshots
 //
-// NOW REQUIRES userId (UUID) to prevent global/null-user mixing.
+// REQUIRES userId (UUID) to prevent mixing.
 // IMPORTANT: Match Supabase schema exactly.
 // - Uses snapshot_date (timestamptz)
 // - DOES NOT write: day_key, source, device
@@ -242,16 +265,15 @@ app.post("/snapshot", async (req, res) => {
   try {
     const body = req.body || {};
 
-    const userIdRaw = body.userId || body.user_id || null;
-    if (!userIdRaw || !uuidRegex.test(String(userIdRaw))) {
+    const userId = getAppUserIdFromAny(body);
+    if (!userId) {
       return res.status(400).json({
         ok: false,
         error: "missing_or_invalid_userId",
         message:
-          "Provide a valid userId (UUID) in JSON body: { userId: \"...\" }",
+          'Provide a valid userId (UUID) in JSON body: { "userId": "..." }',
       });
     }
-    const cleanUserId = String(userIdRaw);
 
     const snapshotDateIso =
       toIsoOrNull(body.date || body.snapshot_date || body.snapshotDate) ||
@@ -264,7 +286,7 @@ app.post("/snapshot", async (req, res) => {
 
     // NOTE: Only include columns that exist in public.daily_snapshots
     const payload = {
-      user_id: cleanUserId,
+      user_id: userId, // IMPORTANT: this is app UUID (current, pre-auth)
       snapshot_date: snapshotDate.toISOString(),
 
       steps: body.steps ?? null,
@@ -278,13 +300,16 @@ app.post("/snapshot", async (req, res) => {
 
       sleep_total_minutes:
         body.sleep?.totalMinutes ?? body.sleep_total_minutes ?? null,
-      sleep_goal_minutes: body.sleep?.goalMinutes ?? body.sleep_goal_minutes ?? null,
+      sleep_goal_minutes:
+        body.sleep?.goalMinutes ?? body.sleep_goal_minutes ?? null,
       sleep_met_goal: body.sleep?.metGoal ?? body.sleep_met_goal ?? null,
 
       weight_kg: body.weightKg ?? body.weight_kg ?? null,
-      // accept multiple client spellings, write to the DB column name
       body_fat_percent:
-        body.bodyFatPercent ?? body.body_fat_percent ?? body.body_fat_pct ?? null,
+        body.bodyFatPercent ??
+        body.body_fat_percent ??
+        body.body_fat_pct ??
+        null,
       waist_cm: body.waistCm ?? body.waist_cm ?? null,
       calories_in: body.caloriesIn ?? body.calories_in ?? null,
       protein_g: body.proteinG ?? body.protein_g ?? null,
@@ -349,17 +374,20 @@ app.post("/snapshot", async (req, res) => {
 });
 
 // --- UPSERT device token ---
+// IMPORTANT: DO NOT write devices.user_id (FK). Keep it NULL pre-auth.
 app.post("/devices", async (req, res) => {
-  const { userId, platform = "ios", token } = req.body || {};
+  const body = req.body || {};
+  const { platform = "ios", token } = body;
+
   if (!token) return res.status(400).json({ error: "Missing token" });
 
-  // keep nullable for now (device tokens can arrive before user is known)
-  const cleanUserId = uuidRegex.test(userId || "") ? userId : null;
+  // We accept app userId for logging, but we do NOT write it to devices.user_id.
+  const appUserId = getAppUserIdFromAny(body);
 
   try {
     const { error } = await supabase
       .from("devices")
-      .upsert([{ user_id: cleanUserId, platform, token }], {
+      .upsert([{ user_id: null, platform, token }], {
         onConflict: "token",
         returning: "minimal",
       });
@@ -386,6 +414,8 @@ app.post("/devices", async (req, res) => {
 
     return res.json({
       message: "Device token stored",
+      // include appUserId for debugging; not persisted in devices table
+      app_user_id: appUserId || null,
       device: rows?.[0] || null,
     });
   } catch (e) {
@@ -440,10 +470,11 @@ app.post("/api/push", handleSend);
 app.post("/push/send", handleSend);
 
 // --- push to the most recent active device ---
+// Pre-auth: cannot filter by userId because devices.user_id is NULL by design.
+// (Filtering comes later when you adopt Supabase Auth.)
 app.post("/push-latest", async (req, res) => {
   try {
     const {
-      userId,
       title = "Test from /push-latest",
       body = "This went to the most recent device",
       data,
@@ -456,13 +487,9 @@ app.post("/push-latest", async (req, res) => {
     let query = supabase
       .from("devices")
       .select("id,user_id,platform,token,active,last_seen,created_at")
-      .eq("active", true);
-
-    if (userId && uuidRegex.test(userId)) {
-      query = query.eq("user_id", userId);
-    }
-
-    query = query.order("last_seen", { ascending: false }).limit(1);
+      .eq("active", true)
+      .order("last_seen", { ascending: false })
+      .limit(1);
 
     const { data: rows, error } = await query;
 
@@ -479,7 +506,6 @@ app.post("/push-latest", async (req, res) => {
       return res.status(404).json({
         ok: false,
         error: "No active devices found",
-        detail: userId ? "No active devices for this user" : "No devices in table",
       });
     }
 
@@ -539,7 +565,7 @@ app.post("/office/measurements", async (req, res) => {
       quality,
     } = payload;
 
-    // keep nullable for now (staff workflows may not have user bound yet)
+    // staff workflows may not have user bound yet; allow nullable
     const cleanUserId = uuidRegex.test(userId || "") ? userId : null;
 
     const tsIso = toIsoOrNull(measuredAt) || new Date().toISOString();
@@ -651,7 +677,6 @@ app.post("/office/conneqt", async (req, res) => {
       reportPdfUrl,
     } = payload;
 
-    // keep nullable for now
     const cleanUserId = uuidRegex.test(userId || "") ? userId : null;
 
     const tsIso = toIsoOrNull(measuredAt) || new Date().toISOString();
@@ -781,7 +806,6 @@ app.post("/office/tanita", async (req, res) => {
       metabolicAge,
     } = payload;
 
-    // keep nullable for now
     const cleanUserId = uuidRegex.test(userId || "") ? userId : null;
 
     const tsIso = toIsoOrNull(measuredAt) || new Date().toISOString();
@@ -882,7 +906,6 @@ app.post("/office/grip", async (req, res) => {
       notes,
     } = payload;
 
-    // keep nullable for now
     const cleanUserId = uuidRegex.test(userId || "") ? userId : null;
 
     const tsIso = toIsoOrNull(measuredAt) || new Date().toISOString();
@@ -975,7 +998,6 @@ app.post("/office/rmr", async (req, res) => {
       notes,
     } = payload;
 
-    // keep nullable for now
     const cleanUserId = uuidRegex.test(userId || "") ? userId : null;
 
     const tsIso = toIsoOrNull(measuredAt) || new Date().toISOString();
