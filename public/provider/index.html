@@ -1,0 +1,1203 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Vitaliage Provider Portal</title>
+
+  <!-- React & ReactDOM from CDN -->
+  <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+  <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+  <!-- Babel Standalone for JSX -->
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+  <!-- Tailwind CSS -->
+  <script src="https://cdn.tailwindcss.com"></script>
+
+  <style>
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Roboto', 'Oxygen',
+        'Ubuntu', 'Cantarell', 'Fira Sans', 'Droid Sans', 'Helvetica Neue',
+        sans-serif;
+      -webkit-font-smoothing: antialiased;
+      -moz-osx-font-smoothing: grayscale;
+    }
+    .medical-badge {
+      display: inline-block;
+      padding: 0.25rem 0.75rem;
+      border-radius: 0.5rem;
+      font-size: 0.875rem;
+      font-weight: 500;
+    }
+    .badge-good {
+      background-color: #dcfce7;
+      color: #166534;
+    }
+    .badge-warning {
+      background-color: #fef3c7;
+      color: #92400e;
+    }
+    .badge-danger {
+      background-color: #fee2e2;
+      color: #991b1b;
+    }
+  </style>
+</head>
+<body class="bg-gray-50">
+  <div id="root"></div>
+
+  <script type="text/babel">
+    const { useState, useEffect, useRef } = React;
+
+    // ========================================
+    // API HELPERS
+    // ========================================
+
+    class APIClient {
+      constructor() {
+        this.apiKey = sessionStorage.getItem('vitaliage_api_key');
+      }
+
+      async request(endpoint, options = {}) {
+        const url = `${endpoint}`;
+        const headers = {
+          'Content-Type': 'application/json',
+          ...options.headers,
+        };
+        if (this.apiKey) {
+          headers['X-Vitaliage-Key'] = this.apiKey;
+        }
+        const response = await fetch(url, {
+          ...options,
+          headers,
+        });
+        if (!response.ok) {
+          throw new Error(`API Error: ${response.status} ${response.statusText}`);
+        }
+        return response.json();
+      }
+
+      async getPatients() {
+        return this.request('/clinician/patients');
+      }
+
+      async getPatientDigest(userId, windowDays = 7) {
+        return this.request(`/clinician/patient/${userId}/digest?windowDays=${windowDays}`);
+      }
+
+      async getPatientTimeline(userId, limit = 20) {
+        return this.request(`/clinician/patient/${userId}/timeline?limit=${limit}`);
+      }
+
+      async submitIntake(data) {
+        return this.request('/clinician/intake', {
+          method: 'POST',
+          body: JSON.stringify(data),
+        });
+      }
+
+      async createPlan(data) {
+        return this.request('/clinic/plans', {
+          method: 'POST',
+          body: JSON.stringify(data),
+        });
+      }
+    }
+
+    const api = new APIClient();
+
+    // ========================================
+    // LOGIN PAGE
+    // ========================================
+
+    function LoginPage({ onLogin }) {
+      const [apiKey, setApiKey] = useState('');
+      const [error, setError] = useState('');
+      const [loading, setLoading] = useState(false);
+
+      const handleSubmit = async (e) => {
+        e.preventDefault();
+        setError('');
+        setLoading(true);
+
+        try {
+          // Test the API key
+          sessionStorage.setItem('vitaliage_api_key', apiKey);
+          api.apiKey = apiKey;
+          const result = await api.getPatients();
+          if (result.ok) {
+            onLogin(apiKey);
+          } else {
+            setError('Invalid API key');
+            sessionStorage.removeItem('vitaliage_api_key');
+          }
+        } catch (err) {
+          setError(`Authentication failed: ${err.message}`);
+          sessionStorage.removeItem('vitaliage_api_key');
+        } finally {
+          setLoading(false);
+        }
+      };
+
+      return (
+        <div className="min-h-screen bg-gradient-to-br from-blue-600 to-blue-800 flex items-center justify-center p-4">
+          <div className="bg-white rounded-lg shadow-2xl w-full max-w-md p-8">
+            <div className="text-center mb-8">
+              <h1 className="text-3xl font-bold text-gray-900 mb-2">Vitaliage</h1>
+              <p className="text-gray-600">Provider Portal</p>
+            </div>
+
+            <form onSubmit={handleSubmit} className="space-y-4">
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-2">
+                  API Key
+                </label>
+                <input
+                  type="password"
+                  value={apiKey}
+                  onChange={(e) => setApiKey(e.target.value)}
+                  placeholder="Enter your API key"
+                  className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
+                  required
+                />
+              </div>
+
+              {error && (
+                <div className="p-3 bg-red-50 border border-red-200 text-red-700 rounded-lg text-sm">
+                  {error}
+                </div>
+              )}
+
+              <button
+                type="submit"
+                disabled={loading}
+                className="w-full bg-blue-600 hover:bg-blue-700 disabled:bg-gray-400 text-white font-semibold py-2 px-4 rounded-lg transition"
+              >
+                {loading ? 'Authenticating...' : 'Sign In'}
+              </button>
+            </form>
+          </div>
+        </div>
+      );
+    }
+
+    // ========================================
+    // PATIENT LIST
+    // ========================================
+
+    function PatientList({ onSelectPatient }) {
+      const [patients, setPatients] = useState([]);
+      const [loading, setLoading] = useState(true);
+      const [error, setError] = useState('');
+
+      useEffect(() => {
+        loadPatients();
+      }, []);
+
+      const loadPatients = async () => {
+        try {
+          const result = await api.getPatients();
+          if (result.ok) {
+            setPatients(result.patients || []);
+          } else {
+            setError('Failed to load patients');
+          }
+        } catch (err) {
+          setError(err.message);
+        } finally {
+          setLoading(false);
+        }
+      };
+
+      const formatDate = (dateStr) => {
+        if (!dateStr) return 'N/A';
+        return new Date(dateStr).toLocaleDateString();
+      };
+
+      const shortenId = (id) => {
+        if (!id) return 'Unknown';
+        return id.substring(0, 8).toUpperCase();
+      };
+
+      if (loading) {
+        return <div className="p-8 text-center">Loading patients...</div>;
+      }
+
+      return (
+        <div className="space-y-4">
+          <div className="flex justify-between items-center mb-6">
+            <h2 className="text-2xl font-bold text-gray-900">Patients</h2>
+            <button
+              onClick={loadPatients}
+              className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition"
+            >
+              Refresh
+            </button>
+          </div>
+
+          {error && (
+            <div className="p-4 bg-red-50 border border-red-200 text-red-700 rounded-lg">
+              {error}
+            </div>
+          )}
+
+          {patients.length === 0 ? (
+            <div className="text-center py-12 text-gray-500">
+              No patients found
+            </div>
+          ) : (
+            <div className="overflow-x-auto">
+              <table className="w-full border-collapse bg-white rounded-lg shadow">
+                <thead>
+                  <tr className="bg-gray-100 border-b">
+                    <th className="px-6 py-3 text-left text-sm font-semibold text-gray-700">Patient ID</th>
+                    <th className="px-6 py-3 text-left text-sm font-semibold text-gray-700">Last Activity</th>
+                    <th className="px-6 py-3 text-left text-sm font-semibold text-gray-700">Steps</th>
+                    <th className="px-6 py-3 text-left text-sm font-semibold text-gray-700">Sleep (hrs)</th>
+                    <th className="px-6 py-3 text-left text-sm font-semibold text-gray-700">HR</th>
+                    <th className="px-6 py-3 text-left text-sm font-semibold text-gray-700">HRV</th>
+                    <th className="px-6 py-3 text-left text-sm font-semibold text-gray-700">Action</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {patients.map((patient) => {
+                    const snap = patient.latestSnapshot || {};
+                    const sleepHours = snap.sleep_total_minutes ? (snap.sleep_total_minutes / 60).toFixed(1) : 'N/A';
+                    return (
+                      <tr key={patient.userId} className="border-b hover:bg-gray-50">
+                        <td className="px-6 py-4 text-sm font-mono text-blue-600">
+                          {shortenId(patient.userId)}
+                        </td>
+                        <td className="px-6 py-4 text-sm text-gray-600">
+                          {formatDate(patient.lastActivity)}
+                        </td>
+                        <td className="px-6 py-4 text-sm text-gray-600">
+                          {snap.steps ?? 'N/A'}
+                        </td>
+                        <td className="px-6 py-4 text-sm text-gray-600">
+                          {sleepHours}
+                        </td>
+                        <td className="px-6 py-4 text-sm text-gray-600">
+                          {snap.resting_hr ?? 'N/A'} bpm
+                        </td>
+                        <td className="px-6 py-4 text-sm text-gray-600">
+                          {snap.hrv ?? 'N/A'} ms
+                        </td>
+                        <td className="px-6 py-4 text-sm">
+                          <button
+                            onClick={() => onSelectPatient(patient.userId)}
+                            className="text-blue-600 hover:text-blue-800 font-semibold"
+                          >
+                            View
+                          </button>
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </div>
+      );
+    }
+
+    // ========================================
+    // PATIENT DETAIL - OVERVIEW TAB
+    // ========================================
+
+    function OverviewTab({ userId }) {
+      const [digest, setDigest] = useState(null);
+      const [loading, setLoading] = useState(true);
+      const [error, setError] = useState('');
+
+      useEffect(() => {
+        loadDigest();
+      }, [userId]);
+
+      const loadDigest = async () => {
+        try {
+          setLoading(true);
+          const result = await api.getPatientDigest(userId, 7);
+          if (result.ok) {
+            setDigest(result.digest);
+          } else {
+            setError('Failed to load digest');
+          }
+        } catch (err) {
+          setError(err.message);
+        } finally {
+          setLoading(false);
+        }
+      };
+
+      if (loading) return <div className="p-8 text-center">Loading overview...</div>;
+
+      if (!digest) {
+        return <div className="p-8 text-center text-gray-500">No data available</div>;
+      }
+
+      const bundle = digest.resolvedBundle || {};
+      const insights = digest.insights || [];
+
+      return (
+        <div className="space-y-6">
+          <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
+            <div className="bg-white p-6 rounded-lg shadow">
+              <p className="text-gray-600 text-sm mb-2">Avg Steps</p>
+              <p className="text-2xl font-bold text-gray-900">
+                {bundle.avgSteps ? bundle.avgSteps.toLocaleString() : 'N/A'}
+              </p>
+            </div>
+            <div className="bg-white p-6 rounded-lg shadow">
+              <p className="text-gray-600 text-sm mb-2">Avg Sleep</p>
+              <p className="text-2xl font-bold text-gray-900">
+                {bundle.avgSleep ? (bundle.avgSleep / 60).toFixed(1) : 'N/A'} hrs
+              </p>
+            </div>
+            <div className="bg-white p-6 rounded-lg shadow">
+              <p className="text-gray-600 text-sm mb-2">Avg HR</p>
+              <p className="text-2xl font-bold text-gray-900">
+                {bundle.avgRestingHr ? bundle.avgRestingHr.toFixed(0) : 'N/A'} bpm
+              </p>
+            </div>
+            <div className="bg-white p-6 rounded-lg shadow">
+              <p className="text-gray-600 text-sm mb-2">Avg HRV</p>
+              <p className="text-2xl font-bold text-gray-900">
+                {bundle.avgHrv ? bundle.avgHrv.toFixed(0) : 'N/A'} ms
+              </p>
+            </div>
+          </div>
+
+          <div className="bg-white p-6 rounded-lg shadow">
+            <h3 className="text-lg font-semibold text-gray-900 mb-4">Weekly Insights</h3>
+            {insights.length === 0 ? (
+              <p className="text-gray-500">No insights available</p>
+            ) : (
+              <ul className="space-y-3">
+                {insights.slice(0, 5).map((insight, idx) => (
+                  <li key={idx} className="flex items-start gap-3">
+                    <span className="text-blue-600 mt-1">•</span>
+                    <span className="text-gray-700">{insight}</span>
+                  </li>
+                ))}
+              </ul>
+            )}
+          </div>
+
+          <div className="bg-white p-6 rounded-lg shadow">
+            <h3 className="text-lg font-semibold text-gray-900 mb-4">Streaks</h3>
+            {digest.streaks && Object.keys(digest.streaks).length > 0 ? (
+              <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+                {Object.entries(digest.streaks).map(([key, value]) => (
+                  <div key={key} className="p-3 bg-gray-50 rounded">
+                    <p className="text-sm text-gray-600 capitalize">{key.replace(/_/g, ' ')}</p>
+                    <p className="text-xl font-bold text-blue-600">{value?.current || 0} days</p>
+                  </div>
+                ))}
+              </div>
+            ) : (
+              <p className="text-gray-500">No streak data</p>
+            )}
+          </div>
+        </div>
+      );
+    }
+
+    // ========================================
+    // PATIENT DETAIL - TIMELINE TAB
+    // ========================================
+
+    function TimelineTab({ userId }) {
+      const [timeline, setTimeline] = useState(null);
+      const [loading, setLoading] = useState(true);
+      const [error, setError] = useState('');
+
+      useEffect(() => {
+        loadTimeline();
+      }, [userId]);
+
+      const loadTimeline = async () => {
+        try {
+          setLoading(true);
+          const result = await api.getPatientTimeline(userId, 20);
+          if (result.ok) {
+            setTimeline(result);
+          } else {
+            setError('Failed to load timeline');
+          }
+        } catch (err) {
+          setError(err.message);
+        } finally {
+          setLoading(false);
+        }
+      };
+
+      const formatDate = (dateStr) => {
+        if (!dateStr) return 'N/A';
+        return new Date(dateStr).toLocaleDateString();
+      };
+
+      if (loading) return <div className="p-8 text-center">Loading timeline...</div>;
+
+      return (
+        <div className="space-y-6">
+          {error && (
+            <div className="p-4 bg-red-50 border border-red-200 text-red-700 rounded-lg">
+              {error}
+            </div>
+          )}
+
+          <div className="bg-white p-6 rounded-lg shadow">
+            <h3 className="text-lg font-semibold text-gray-900 mb-4">Testing Sessions</h3>
+            {timeline?.sessions && timeline.sessions.length > 0 ? (
+              <div className="space-y-3">
+                {timeline.sessions.map((session) => (
+                  <div key={session.id} className="p-4 border border-gray-200 rounded-lg">
+                    <div className="flex justify-between items-start">
+                      <div>
+                        <p className="font-semibold text-gray-900 capitalize">
+                          {session.session_type || 'Testing'} Session
+                        </p>
+                        <p className="text-sm text-gray-600">
+                          {formatDate(session.session_date)}
+                        </p>
+                      </div>
+                      <span className={`medical-badge ${session.status === 'completed' ? 'badge-good' : 'badge-warning'}`}>
+                        {session.status || 'pending'}
+                      </span>
+                    </div>
+                    {session.notes && <p className="text-sm text-gray-600 mt-2">{session.notes}</p>}
+                  </div>
+                ))}
+              </div>
+            ) : (
+              <p className="text-gray-500">No sessions found</p>
+            )}
+          </div>
+
+          <div className="bg-white p-6 rounded-lg shadow">
+            <h3 className="text-lg font-semibold text-gray-900 mb-4">Care Plans</h3>
+            {timeline?.plans && timeline.plans.length > 0 ? (
+              <div className="space-y-3">
+                {timeline.plans.map((plan) => (
+                  <div key={plan.id} className="p-4 border border-gray-200 rounded-lg">
+                    <div className="flex justify-between items-start">
+                      <div>
+                        <p className="font-semibold text-gray-900 capitalize">
+                          {plan.plan_type} Plan
+                        </p>
+                        {plan.title && <p className="text-sm text-gray-700">{plan.title}</p>}
+                        <p className="text-xs text-gray-500 mt-1">
+                          {plan.start_date && formatDate(plan.start_date)} to {plan.end_date && formatDate(plan.end_date)}
+                        </p>
+                      </div>
+                      <span className={`medical-badge ${plan.status === 'active' ? 'badge-good' : 'badge-warning'}`}>
+                        {plan.status || 'pending'}
+                      </span>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            ) : (
+              <p className="text-gray-500">No care plans found</p>
+            )}
+          </div>
+
+          <div className="bg-white p-6 rounded-lg shadow">
+            <h3 className="text-lg font-semibold text-gray-900 mb-4">Recent Snapshots</h3>
+            {timeline?.recent_snapshots && timeline.recent_snapshots.length > 0 ? (
+              <div className="space-y-2">
+                {timeline.recent_snapshots.slice(0, 10).map((snap, idx) => (
+                  <div key={idx} className="p-3 bg-gray-50 rounded border border-gray-200 text-sm">
+                    <p className="font-semibold text-gray-900">{snap.day_key}</p>
+                    <p className="text-gray-600">
+                      Steps: {snap.steps || 'N/A'} | Sleep: {snap.sleep_total_minutes ? (snap.sleep_total_minutes / 60).toFixed(1) : 'N/A'} hrs | HR: {snap.resting_hr || 'N/A'} bpm | HRV: {snap.hrv || 'N/A'} ms
+                    </p>
+                  </div>
+                ))}
+              </div>
+            ) : (
+              <p className="text-gray-500">No snapshots found</p>
+            )}
+          </div>
+        </div>
+      );
+    }
+
+    // ========================================
+    // PATIENT DETAIL - DATA ENTRY TAB
+    // ========================================
+
+    function DataEntryTab({ userId, onSubmit }) {
+      const [activeForm, setActiveForm] = useState('quickIntake');
+      return (
+        <div className="space-y-6">
+          <div className="flex gap-4 border-b">
+            <button
+              onClick={() => setActiveForm('quickIntake')}
+              className={`px-4 py-2 font-semibold border-b-2 transition ${
+                activeForm === 'quickIntake'
+                  ? 'border-blue-600 text-blue-600'
+                  : 'border-transparent text-gray-600 hover:text-gray-900'
+              }`}
+            >
+              Quick Intake
+            </button>
+            <button
+              onClick={() => setActiveForm('carePlan')}
+              className={`px-4 py-2 font-semibold border-b-2 transition ${
+                activeForm === 'carePlan'
+                  ? 'border-blue-600 text-blue-600'
+                  : 'border-transparent text-gray-600 hover:text-gray-900'
+              }`}
+            >
+              Care Plan Builder
+            </button>
+          </div>
+
+          {activeForm === 'quickIntake' && (
+            <QuickIntakeForm userId={userId} onSubmit={onSubmit} />
+          )}
+          {activeForm === 'carePlan' && (
+            <CarePlanForm userId={userId} onSubmit={onSubmit} />
+          )}
+        </div>
+      );
+    }
+
+    // ========================================
+    // QUICK INTAKE FORM
+    // ========================================
+
+    function QuickIntakeForm({ userId, onSubmit }) {
+      const [formData, setFormData] = useState({
+        userId,
+        sessionDate: new Date().toISOString().split('T')[0],
+        sessionType: 'initial',
+        clinicianId: '',
+        notes: '',
+        restingVitals: {
+          bpSystolic: '',
+          bpDiastolic: '',
+          weightKg: '',
+          bodyFatPct: '',
+          restingHr: '',
+          spo2Pct: '',
+          heightCm: '',
+        },
+        bodyComposition: {
+          weightKg: '',
+          bodyFatPct: '',
+          muscleMassKg: '',
+        },
+        conneqt: {
+          heartRate: '',
+          brachialSystolic: '',
+          brachialDiastolic: '',
+        },
+        gripStrength: {
+          leftBest: '',
+          rightBest: '',
+          dominantHand: 'right',
+        },
+        sitToStand: {
+          timeSeconds: '',
+          handsUsed: 'no',
+        },
+        gaitSpeed: {
+          timeSeconds: '',
+          speedMs: '',
+        },
+        sixMinWalk: {
+          distanceMeters: '',
+          peakHr: '',
+          recoveryHr1min: '',
+        },
+        vo2: {
+          finalWorkloadWatts: '',
+          estimatedVo2MlKgMin: '',
+        },
+        labs: {
+          hba1cPct: '',
+          fastingGlucoseMgDl: '',
+          totalCholesterol: '',
+          ldlCholesterol: '',
+          hdlCholesterol: '',
+          triglycerides: '',
+        },
+      });
+
+      const [loading, setLoading] = useState(false);
+      const [error, setError] = useState('');
+      const [success, setSuccess] = useState('');
+
+      const handleInputChange = (section, field, value) => {
+        setFormData((prev) => ({
+          ...prev,
+          [section]: typeof field === 'string'
+            ? { ...prev[section], [field]: value }
+            : value,
+        }));
+      };
+
+      const cleanData = (obj) => {
+        if (!obj) return null;
+        const cleaned = {};
+        for (const [key, value] of Object.entries(obj)) {
+          if (value !== '' && value !== null) {
+            cleaned[key] = isNaN(value) ? value : Number(value);
+          }
+        }
+        return Object.keys(cleaned).length > 0 ? cleaned : null;
+      };
+
+      const handleSubmit = async (e) => {
+        e.preventDefault();
+        setError('');
+        setSuccess('');
+        setLoading(true);
+
+        try {
+          const payload = {
+            userId: formData.userId,
+            sessionDate: formData.sessionDate,
+            sessionType: formData.sessionType,
+            clinicianId: formData.clinicianId || undefined,
+            notes: formData.notes || undefined,
+            restingVitals: cleanData(formData.restingVitals),
+            bodyComposition: cleanData(formData.bodyComposition),
+            conneqt: cleanData(formData.conneqt),
+            gripStrength: cleanData(formData.gripStrength),
+            sitToStand: cleanData(formData.sitToStand),
+            gaitSpeed: cleanData(formData.gaitSpeed),
+            sixMinWalk: cleanData(formData.sixMinWalk),
+            vo2: cleanData(formData.vo2),
+            labs: cleanData(formData.labs),
+          };
+
+          const result = await api.submitIntake(payload);
+          if (result.ok) {
+            setSuccess('Intake submitted successfully!');
+            onSubmit?.();
+            setFormData((prev) => ({
+              ...prev,
+              restingVitals: { bpSystolic: '', bpDiastolic: '', weightKg: '', bodyFatPct: '', restingHr: '', spo2Pct: '', heightCm: '' },
+              bodyComposition: { weightKg: '', bodyFatPct: '', muscleMassKg: '' },
+              conneqt: { heartRate: '', brachialSystolic: '', brachialDiastolic: '' },
+              gripStrength: { leftBest: '', rightBest: '', dominantHand: 'right' },
+              sitToStand: { timeSeconds: '', handsUsed: 'no' },
+              gaitSpeed: { timeSeconds: '', speedMs: '' },
+              sixMinWalk: { distanceMeters: '', peakHr: '', recoveryHr1min: '' },
+              vo2: { finalWorkloadWatts: '', estimatedVo2MlKgMin: '' },
+              labs: { hba1cPct: '', fastingGlucoseMgDl: '', totalCholesterol: '', ldlCholesterol: '', hdlCholesterol: '', triglycerides: '' },
+            }));
+          } else {
+            setError(result.error || 'Failed to submit intake');
+          }
+        } catch (err) {
+          setError(err.message);
+        } finally {
+          setLoading(false);
+        }
+      };
+
+      const renderSection = (title, section, fields) => (
+        <fieldset className="bg-white p-6 rounded-lg shadow border border-gray-200">
+          <legend className="text-lg font-semibold text-gray-900 mb-4">{title}</legend>
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+            {fields.map((field) => (
+              <div key={field.key}>
+                <label className="block text-sm font-medium text-gray-700 mb-1">
+                  {field.label}
+                </label>
+                <input
+                  type={field.type || 'text'}
+                  value={formData[section][field.key] || ''}
+                  onChange={(e) => handleInputChange(section, field.key, e.target.value)}
+                  placeholder={field.placeholder || ''}
+                  className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 text-sm"
+                />
+              </div>
+            ))}
+          </div>
+        </fieldset>
+      );
+
+      return (
+        <form onSubmit={handleSubmit} className="space-y-6">
+          <div className="bg-white p-6 rounded-lg shadow space-y-4">
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">Session Date</label>
+                <input
+                  type="date"
+                  value={formData.sessionDate}
+                  onChange={(e) => handleInputChange('sessionDate', null, e.target.value)}
+                  className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
+                />
+              </div>
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">Session Type</label>
+                <select
+                  value={formData.sessionType}
+                  onChange={(e) => handleInputChange('sessionType', null, e.target.value)}
+                  className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
+                >
+                  <option value="initial">Initial</option>
+                  <option value="followup">Follow-up</option>
+                  <option value="reassessment">Reassessment</option>
+                </select>
+              </div>
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">Clinician ID</label>
+                <input
+                  type="text"
+                  value={formData.clinicianId}
+                  onChange={(e) => handleInputChange('clinicianId', null, e.target.value)}
+                  placeholder="Optional"
+                  className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
+                />
+              </div>
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">Notes</label>
+                <input
+                  type="text"
+                  value={formData.notes}
+                  onChange={(e) => handleInputChange('notes', null, e.target.value)}
+                  placeholder="Optional notes"
+                  className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
+                />
+              </div>
+            </div>
+          </div>
+
+          {renderSection('Resting Vitals', 'restingVitals', [
+            { key: 'bpSystolic', label: 'BP Systolic (mmHg)', type: 'number' },
+            { key: 'bpDiastolic', label: 'BP Diastolic (mmHg)', type: 'number' },
+            { key: 'weightKg', label: 'Weight (kg)', type: 'number' },
+            { key: 'bodyFatPct', label: 'Body Fat (%)', type: 'number' },
+            { key: 'restingHr', label: 'Resting HR (bpm)', type: 'number' },
+            { key: 'spo2Pct', label: 'SpO2 (%)', type: 'number' },
+            { key: 'heightCm', label: 'Height (cm)', type: 'number' },
+          ])}
+
+          {renderSection('Body Composition (Tanita)', 'bodyComposition', [
+            { key: 'weightKg', label: 'Weight (kg)', type: 'number' },
+            { key: 'bodyFatPct', label: 'Body Fat (%)', type: 'number' },
+            { key: 'muscleMassKg', label: 'Muscle Mass (kg)', type: 'number' },
+          ])}
+
+          {renderSection('CONNEQT Pulse', 'conneqt', [
+            { key: 'heartRate', label: 'Heart Rate (bpm)', type: 'number' },
+            { key: 'brachialSystolic', label: 'Brachial Systolic (mmHg)', type: 'number' },
+            { key: 'brachialDiastolic', label: 'Brachial Diastolic (mmHg)', type: 'number' },
+          ])}
+
+          {renderSection('Grip Strength', 'gripStrength', [
+            { key: 'leftBest', label: 'Left Best (kgf)', type: 'number' },
+            { key: 'rightBest', label: 'Right Best (kgf)', type: 'number' },
+          ])}
+
+          {renderSection('Sit-to-Stand', 'sitToStand', [
+            { key: 'timeSeconds', label: 'Time (seconds)', type: 'number' },
+          ])}
+
+          {renderSection('Gait Speed', 'gaitSpeed', [
+            { key: 'timeSeconds', label: 'Time (seconds)', type: 'number' },
+            { key: 'speedMs', label: 'Speed (m/s)', type: 'number' },
+          ])}
+
+          {renderSection('6-Minute Walk Test', 'sixMinWalk', [
+            { key: 'distanceMeters', label: 'Distance (meters)', type: 'number' },
+            { key: 'peakHr', label: 'Peak HR (bpm)', type: 'number' },
+            { key: 'recoveryHr1min', label: 'Recovery HR at 1 min (bpm)', type: 'number' },
+          ])}
+
+          {renderSection('VO2 Assessment', 'vo2', [
+            { key: 'finalWorkloadWatts', label: 'Final Workload (watts)', type: 'number' },
+            { key: 'estimatedVo2MlKgMin', label: 'Est. VO2 (ml/kg/min)', type: 'number' },
+          ])}
+
+          {renderSection('Lab Results', 'labs', [
+            { key: 'hba1cPct', label: 'HbA1c (%)', type: 'number' },
+            { key: 'fastingGlucoseMgDl', label: 'Fasting Glucose (mg/dL)', type: 'number' },
+            { key: 'totalCholesterol', label: 'Total Cholesterol (mg/dL)', type: 'number' },
+            { key: 'ldlCholesterol', label: 'LDL (mg/dL)', type: 'number' },
+            { key: 'hdlCholesterol', label: 'HDL (mg/dL)', type: 'number' },
+            { key: 'triglycerides', label: 'Triglycerides (mg/dL)', type: 'number' },
+          ])}
+
+          {error && (
+            <div className="p-4 bg-red-50 border border-red-200 text-red-700 rounded-lg">
+              {error}
+            </div>
+          )}
+
+          {success && (
+            <div className="p-4 bg-green-50 border border-green-200 text-green-700 rounded-lg">
+              {success}
+            </div>
+          )}
+
+          <button
+            type="submit"
+            disabled={loading}
+            className="w-full bg-blue-600 hover:bg-blue-700 disabled:bg-gray-400 text-white font-semibold py-2 px-4 rounded-lg transition"
+          >
+            {loading ? 'Submitting...' : 'Submit Intake'}
+          </button>
+        </form>
+      );
+    }
+
+    // ========================================
+    // CARE PLAN FORM
+    // ========================================
+
+    function CarePlanForm({ userId, onSubmit }) {
+      const [formData, setFormData] = useState({
+        userId,
+        planType: 'workout',
+        title: '',
+        summary: '',
+        planBody: '',
+        goals: [],
+        startDate: new Date().toISOString().split('T')[0],
+        endDate: '',
+      });
+
+      const [loading, setLoading] = useState(false);
+      const [error, setError] = useState('');
+      const [success, setSuccess] = useState('');
+
+      const handleSubmit = async (e) => {
+        e.preventDefault();
+        setError('');
+        setSuccess('');
+
+        if (!formData.title.trim()) {
+          setError('Plan title is required');
+          return;
+        }
+
+        setLoading(true);
+
+        try {
+          const payload = {
+            userId: formData.userId,
+            planType: formData.planType,
+            title: formData.title,
+            summary: formData.summary || undefined,
+            planBody: formData.planBody || undefined,
+            goals: formData.goals.filter(g => g.trim()).length > 0 ? formData.goals.filter(g => g.trim()) : undefined,
+            startDate: formData.startDate || undefined,
+            endDate: formData.endDate || undefined,
+          };
+
+          const result = await api.createPlan(payload);
+          if (result.ok) {
+            setSuccess('Care plan created successfully!');
+            onSubmit?.();
+            setFormData({
+              userId,
+              planType: 'workout',
+              title: '',
+              summary: '',
+              planBody: '',
+              goals: [],
+              startDate: new Date().toISOString().split('T')[0],
+              endDate: '',
+            });
+          } else {
+            setError(result.error || 'Failed to create plan');
+          }
+        } catch (err) {
+          setError(err.message);
+        } finally {
+          setLoading(false);
+        }
+      };
+
+      const addGoal = () => {
+        setFormData((prev) => ({
+          ...prev,
+          goals: [...prev.goals, ''],
+        }));
+      };
+
+      const removeGoal = (idx) => {
+        setFormData((prev) => ({
+          ...prev,
+          goals: prev.goals.filter((_, i) => i !== idx),
+        }));
+      };
+
+      const updateGoal = (idx, value) => {
+        setFormData((prev) => ({
+          ...prev,
+          goals: prev.goals.map((g, i) => (i === idx ? value : g)),
+        }));
+      };
+
+      return (
+        <form onSubmit={handleSubmit} className="space-y-6">
+          <div className="bg-white p-6 rounded-lg shadow space-y-4">
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">Plan Type</label>
+                <select
+                  value={formData.planType}
+                  onChange={(e) => setFormData((prev) => ({ ...prev, planType: e.target.value }))}
+                  className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
+                >
+                  <option value="workout">Workout</option>
+                  <option value="nutrition">Nutrition</option>
+                  <option value="lifestyle">Lifestyle</option>
+                  <option value="combined">Combined</option>
+                </select>
+              </div>
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">Plan Title</label>
+                <input
+                  type="text"
+                  value={formData.title}
+                  onChange={(e) => setFormData((prev) => ({ ...prev, title: e.target.value }))}
+                  placeholder="e.g., 12-week Strength Program"
+                  className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
+                  required
+                />
+              </div>
+            </div>
+
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-1">Summary</label>
+              <textarea
+                value={formData.summary}
+                onChange={(e) => setFormData((prev) => ({ ...prev, summary: e.target.value }))}
+                placeholder="Brief overview of the plan"
+                rows="3"
+                className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
+              />
+            </div>
+
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-1">Plan Details</label>
+              <textarea
+                value={formData.planBody}
+                onChange={(e) => setFormData((prev) => ({ ...prev, planBody: e.target.value }))}
+                placeholder="Detailed plan body"
+                rows="6"
+                className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
+              />
+            </div>
+
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">Start Date</label>
+                <input
+                  type="date"
+                  value={formData.startDate}
+                  onChange={(e) => setFormData((prev) => ({ ...prev, startDate: e.target.value }))}
+                  className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
+                />
+              </div>
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">End Date</label>
+                <input
+                  type="date"
+                  value={formData.endDate}
+                  onChange={(e) => setFormData((prev) => ({ ...prev, endDate: e.target.value }))}
+                  className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
+                />
+              </div>
+            </div>
+          </div>
+
+          <div className="bg-white p-6 rounded-lg shadow">
+            <div className="flex justify-between items-center mb-4">
+              <h3 className="text-lg font-semibold text-gray-900">Goals</h3>
+              <button
+                type="button"
+                onClick={addGoal}
+                className="px-3 py-1 bg-blue-600 text-white text-sm rounded hover:bg-blue-700 transition"
+              >
+                + Add Goal
+              </button>
+            </div>
+            <div className="space-y-3">
+              {formData.goals.map((goal, idx) => (
+                <div key={idx} className="flex gap-2">
+                  <input
+                    type="text"
+                    value={goal}
+                    onChange={(e) => updateGoal(idx, e.target.value)}
+                    placeholder="e.g., Increase leg strength by 20%"
+                    className="flex-1 px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 text-sm"
+                  />
+                  <button
+                    type="button"
+                    onClick={() => removeGoal(idx)}
+                    className="px-3 py-2 bg-red-100 text-red-600 rounded-lg hover:bg-red-200 transition"
+                  >
+                    Remove
+                  </button>
+                </div>
+              ))}
+            </div>
+          </div>
+
+          {error && (
+            <div className="p-4 bg-red-50 border border-red-200 text-red-700 rounded-lg">
+              {error}
+            </div>
+          )}
+
+          {success && (
+            <div className="p-4 bg-green-50 border border-green-200 text-green-700 rounded-lg">
+              {success}
+            </div>
+          )}
+
+          <button
+            type="submit"
+            disabled={loading}
+            className="w-full bg-blue-600 hover:bg-blue-700 disabled:bg-gray-400 text-white font-semibold py-2 px-4 rounded-lg transition"
+          >
+            {loading ? 'Creating Plan...' : 'Create Care Plan'}
+          </button>
+        </form>
+      );
+    }
+
+    // ========================================
+    // PATIENT DETAIL VIEW
+    // ========================================
+
+    function PatientDetailView({ patientId, onBack }) {
+      const [activeTab, setActiveTab] = useState('overview');
+
+      return (
+        <div className="space-y-6">
+          <div className="flex items-center gap-4 mb-6">
+            <button
+              onClick={onBack}
+              className="px-4 py-2 text-blue-600 hover:text-blue-800 font-semibold"
+            >
+              ← Back to Patients
+            </button>
+            <h2 className="text-2xl font-bold text-gray-900">
+              Patient: {patientId.substring(0, 8).toUpperCase()}
+            </h2>
+          </div>
+
+          <div className="flex gap-4 border-b bg-white rounded-t-lg px-6 py-4">
+            <button
+              onClick={() => setActiveTab('overview')}
+              className={`px-4 py-2 font-semibold border-b-2 transition ${
+                activeTab === 'overview'
+                  ? 'border-blue-600 text-blue-600'
+                  : 'border-transparent text-gray-600 hover:text-gray-900'
+              }`}
+            >
+              Overview
+            </button>
+            <button
+              onClick={() => setActiveTab('timeline')}
+              className={`px-4 py-2 font-semibold border-b-2 transition ${
+                activeTab === 'timeline'
+                  ? 'border-blue-600 text-blue-600'
+                  : 'border-transparent text-gray-600 hover:text-gray-900'
+              }`}
+            >
+              Timeline
+            </button>
+            <button
+              onClick={() => setActiveTab('dataEntry')}
+              className={`px-4 py-2 font-semibold border-b-2 transition ${
+                activeTab === 'dataEntry'
+                  ? 'border-blue-600 text-blue-600'
+                  : 'border-transparent text-gray-600 hover:text-gray-900'
+              }`}
+            >
+              Data Entry
+            </button>
+          </div>
+
+          <div className="bg-white p-6 rounded-b-lg shadow">
+            {activeTab === 'overview' && <OverviewTab userId={patientId} />}
+            {activeTab === 'timeline' && <TimelineTab userId={patientId} />}
+            {activeTab === 'dataEntry' && (
+              <DataEntryTab userId={patientId} onSubmit={() => setActiveTab('timeline')} />
+            )}
+          </div>
+        </div>
+      );
+    }
+
+    // ========================================
+    // MAIN APP
+    // ========================================
+
+    function App() {
+      const [isLoggedIn, setIsLoggedIn] = useState(
+        sessionStorage.getItem('vitaliage_api_key') != null
+      );
+      const [selectedPatient, setSelectedPatient] = useState(null);
+
+      if (!isLoggedIn) {
+        return (
+          <LoginPage
+            onLogin={(key) => {
+              api.apiKey = key;
+              setIsLoggedIn(true);
+            }}
+          />
+        );
+      }
+
+      return (
+        <div className="min-h-screen bg-gray-50">
+          <header className="bg-white shadow">
+            <div className="max-w-7xl mx-auto px-4 py-6 sm:px-6 lg:px-8">
+              <div className="flex justify-between items-center">
+                <div>
+                  <h1 className="text-3xl font-bold text-gray-900">Vitaliage Provider Portal</h1>
+                  <p className="text-gray-600 mt-1">Clinical Management System</p>
+                </div>
+                <button
+                  onClick={() => {
+                    sessionStorage.removeItem('vitaliage_api_key');
+                    setIsLoggedIn(false);
+                    setSelectedPatient(null);
+                  }}
+                  className="px-4 py-2 bg-red-600 text-white rounded-lg hover:bg-red-700 transition"
+                >
+                  Sign Out
+                </button>
+              </div>
+            </div>
+          </header>
+
+          <main className="max-w-7xl mx-auto px-4 py-8 sm:px-6 lg:px-8">
+            {selectedPatient ? (
+              <PatientDetailView
+                patientId={selectedPatient}
+                onBack={() => setSelectedPatient(null)}
+              />
+            ) : (
+              <PatientList onSelectPatient={setSelectedPatient} />
+            )}
+          </main>
+        </div>
+      );
+    }
+
+    // ========================================
+    // RENDER
+    // ========================================
+
+    const root = ReactDOM.createRoot(document.getElementById('root'));
+    root.render(<App />);
+  </script>
+</body>
+</html>

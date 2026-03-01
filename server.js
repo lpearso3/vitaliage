@@ -28,6 +28,19 @@ const {
   normalizeProviderData,
 } = require("./services/integrations/providers");
 
+const {
+  computeBiologicalAge,
+} = require("./services/biologicalAge/computeBiologicalAge");
+
+const {
+  sendMorningReadinessNotifications,
+} = require("./services/notifications/morningReadiness");
+
+const {
+  startCronJobs,
+  stopCronJobs,
+} = require("./services/notifications/scheduler");
+
 // --- Structured logging helper (defined early for middleware use) ---
 function structuredLog(event, data = {}) {
   const entry = {
@@ -772,6 +785,30 @@ app.post("/push-latest", async (req, res) => {
     });
   } catch (err) {
     console.error("Error in /push-latest:", err);
+    return res.status(500).json({
+      ok: false,
+      error: "Internal server error",
+      detail: err.message,
+    });
+  }
+});
+
+// =======================================================
+// MORNING READINESS NOTIFICATIONS
+// =======================================================
+// POST /admin/send-morning-readiness — Trigger morning readiness notifications
+app.post("/admin/send-morning-readiness", async (req, res) => {
+  try {
+    const results = await sendMorningReadinessNotifications(supabase, { sendPush });
+    return res.status(200).json({
+      ok: true,
+      sent: results.sent,
+      failed: results.failed,
+      skipped: results.skipped,
+      errors: results.errors && results.errors.length > 0 ? results.errors : undefined,
+    });
+  } catch (err) {
+    console.error("Error in /admin/send-morning-readiness:", err);
     return res.status(500).json({
       ok: false,
       error: "Internal server error",
@@ -2632,6 +2669,258 @@ app.get("/clinic/plans/:id/progress", async (req, res) => {
 });
 
 // =======================================================
+// SUPPLEMENT & MEDICATION TRACKING
+// =======================================================
+
+/**
+ * GET /supplements - List active supplement protocols for a user
+ * Query: userId (required), status (optional, default: "active"), limit (optional, default: 50)
+ */
+app.get("/supplements", async (req, res) => {
+  try {
+    const { userId, status = "active", limit = 50 } = req.query;
+    if (!userId) return res.status(400).json({ ok: false, error: "userId_required" });
+
+    let query = supabase.from("supplement_protocols").select("*").eq("user_id", userId);
+    if (status !== "all") query = query.eq("active", status === "active");
+    query = query.order("created_at", { ascending: false }).limit(parseInt(limit));
+
+    const { data, error } = await query;
+    if (error) return res.status(500).json({ ok: false, error: error.message });
+    return res.json({ ok: true, supplements: data || [] });
+  } catch (err) {
+    structuredLog("error_get_supplements", { error: err.message });
+    return res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
+/**
+ * POST /supplements - Create a new supplement protocol (provider use)
+ * Body: { userId, name, dosage, unit, frequency, timesPerDay, scheduledTimes, instructions, category, prescribedBy, startDate, endDate }
+ */
+app.post("/supplements", async (req, res) => {
+  try {
+    const p = req.body || {};
+    const { userId, name } = p;
+
+    if (!userId) return res.status(400).json({ ok: false, error: "userId_required" });
+    if (!name) return res.status(400).json({ ok: false, error: "name_required" });
+
+    const row = {
+      user_id: userId,
+      name: name,
+      dosage: p.dosage ?? null,
+      unit: p.unit ?? null,
+      frequency: p.frequency ?? "daily",
+      times_per_day: p.timesPerDay ?? 1,
+      scheduled_times: p.scheduledTimes ?? ["08:00"],
+      instructions: p.instructions ?? null,
+      category: p.category ?? "supplement",
+      prescribed_by: p.prescribedBy ?? null,
+      start_date: p.startDate ?? null,
+      end_date: p.endDate ?? null,
+      active: true,
+    };
+
+    const { data, error } = await supabase.from("supplement_protocols").insert(row).select().limit(1);
+    if (error) return res.status(500).json({ ok: false, error: "db_insert_failed", detail: error.message });
+    return res.status(201).json({ ok: true, supplement: data?.[0] || null });
+  } catch (err) {
+    structuredLog("error_post_supplements", { error: err.message });
+    return res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
+/**
+ * PUT /supplements/:id - Update a supplement protocol
+ * Body: { name, dosage, unit, frequency, timesPerDay, scheduledTimes, instructions, category, prescribedBy, startDate, endDate, active }
+ */
+app.put("/supplements/:id", async (req, res) => {
+  try {
+    const { id } = req.params;
+    const p = req.body || {};
+
+    const updates = {};
+    const allowed = ["name", "dosage", "unit", "frequency", "timesPerDay", "scheduledTimes", "instructions", "category", "prescribedBy", "startDate", "endDate", "active"];
+    const fieldMap = {
+      timesPerDay: "times_per_day",
+      scheduledTimes: "scheduled_times",
+      prescribedBy: "prescribed_by",
+      startDate: "start_date",
+      endDate: "end_date",
+    };
+
+    for (const key of allowed) {
+      if (p[key] !== undefined) updates[fieldMap[key] || key] = p[key];
+    }
+    updates.updated_at = new Date().toISOString();
+
+    const { data, error } = await supabase.from("supplement_protocols").update(updates).eq("id", id).select().single();
+    if (error) return res.status(500).json({ ok: false, error: error.message });
+    return res.json({ ok: true, supplement: data });
+  } catch (err) {
+    structuredLog("error_put_supplements", { error: err.message });
+    return res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
+/**
+ * DELETE /supplements/:id - Soft delete (set active=false)
+ */
+app.delete("/supplements/:id", async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { data, error } = await supabase
+      .from("supplement_protocols")
+      .update({ active: false, updated_at: new Date().toISOString() })
+      .eq("id", id)
+      .select()
+      .single();
+    if (error) return res.status(500).json({ ok: false, error: error.message });
+    return res.json({ ok: true, supplement: data });
+  } catch (err) {
+    structuredLog("error_delete_supplements", { error: err.message });
+    return res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
+/**
+ * POST /supplements/log - Log a supplement as taken
+ * Body: { userId, protocolId, dayKey, scheduledTime, status, notes }
+ */
+app.post("/supplements/log", async (req, res) => {
+  try {
+    const p = req.body || {};
+    const { userId, protocolId, dayKey, scheduledTime } = p;
+
+    if (!userId) return res.status(400).json({ ok: false, error: "userId_required" });
+    if (!protocolId) return res.status(400).json({ ok: false, error: "protocolId_required" });
+    if (!dayKey) return res.status(400).json({ ok: false, error: "dayKey_required" });
+
+    const row = {
+      user_id: userId,
+      protocol_id: protocolId,
+      taken_at: new Date().toISOString(),
+      day_key: dayKey,
+      scheduled_time: scheduledTime ?? null,
+      status: p.status ?? "taken",
+      notes: p.notes ?? null,
+    };
+
+    const { data, error } = await supabase
+      .from("supplement_logs")
+      .upsert(row, { onConflict: "user_id,protocol_id,day_key,scheduled_time" })
+      .select()
+      .limit(1);
+    if (error) return res.status(500).json({ ok: false, error: "db_upsert_failed", detail: error.message });
+    return res.json({ ok: true, log: data?.[0] || null });
+  } catch (err) {
+    structuredLog("error_post_supplement_log", { error: err.message });
+    return res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
+/**
+ * GET /supplements/log - Get supplement logs for a user in a date range
+ * Query: userId (required), from (date), to (date), protocolId (optional), limit (default: 500)
+ */
+app.get("/supplements/log", async (req, res) => {
+  try {
+    const { userId, from, to, protocolId, limit = 500 } = req.query;
+
+    if (!userId) return res.status(400).json({ ok: false, error: "userId_required" });
+
+    let query = supabase.from("supplement_logs").select("*").eq("user_id", userId);
+
+    if (protocolId) query = query.eq("protocol_id", protocolId);
+    if (from) query = query.gte("day_key", from);
+    if (to) query = query.lte("day_key", to);
+
+    query = query.order("taken_at", { ascending: false }).limit(parseInt(limit));
+
+    const { data, error } = await query;
+    if (error) return res.status(500).json({ ok: false, error: error.message });
+    return res.json({ ok: true, logs: data || [] });
+  } catch (err) {
+    structuredLog("error_get_supplement_log", { error: err.message });
+    return res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
+/**
+ * GET /supplements/adherence - Get supplement adherence statistics
+ * Query: userId (required), days (optional, default: 30)
+ * Returns: adherence per supplement and overall adherence percentage
+ */
+app.get("/supplements/adherence", async (req, res) => {
+  try {
+    const { userId, days = 30 } = req.query;
+
+    if (!userId) return res.status(400).json({ ok: false, error: "userId_required" });
+
+    // Calculate date range
+    const today = new Date();
+    const startDate = new Date(today.getTime() - parseInt(days) * 24 * 60 * 60 * 1000);
+    const fromKey = startDate.toISOString().split("T")[0]; // YYYY-MM-DD
+
+    // Get active supplements
+    const { data: supplements, error: suppErr } = await supabase
+      .from("supplement_protocols")
+      .select("id, name, dosage, unit, times_per_day")
+      .eq("user_id", userId)
+      .eq("active", true);
+    if (suppErr) return res.status(500).json({ ok: false, error: suppErr.message });
+
+    // Get logs in date range
+    const { data: logs, error: logErr } = await supabase
+      .from("supplement_logs")
+      .select("*")
+      .eq("user_id", userId)
+      .gte("day_key", fromKey);
+    if (logErr) return res.status(500).json({ ok: false, error: logErr.message });
+
+    // Calculate adherence per supplement
+    const adherenceBySupp = {};
+    for (const supp of supplements) {
+      const suppLogs = logs.filter((l) => l.protocol_id === supp.id);
+      const expectedDoses = supp.times_per_day * parseInt(days); // Expected total doses
+      const actualDoses = suppLogs.filter((l) => l.status === "taken").length;
+      const percentage = expectedDoses > 0 ? Math.round((actualDoses / expectedDoses) * 100) : 0;
+
+      adherenceBySupp[supp.id] = {
+        id: supp.id,
+        name: supp.name,
+        dosage: supp.dosage,
+        unit: supp.unit,
+        timesPerDay: supp.times_per_day,
+        expectedDoses,
+        actualDoses,
+        adherencePercentage: percentage,
+      };
+    }
+
+    // Calculate overall adherence
+    const totalExpected = Object.values(adherenceBySupp).reduce((sum, s) => sum + s.expectedDoses, 0);
+    const totalActual = Object.values(adherenceBySupp).reduce((sum, s) => sum + s.actualDoses, 0);
+    const overallAdherence = totalExpected > 0 ? Math.round((totalActual / totalExpected) * 100) : 0;
+
+    return res.json({
+      ok: true,
+      userId,
+      days: parseInt(days),
+      dateRange: { from: fromKey, to: today.toISOString().split("T")[0] },
+      adherenceBySupplements: Object.values(adherenceBySupp),
+      overallAdherencePercentage: overallAdherence,
+      totalExpectedDoses: totalExpected,
+      totalActualDoses: totalActual,
+    });
+  } catch (err) {
+    structuredLog("error_get_supplement_adherence", { error: err.message });
+    return res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
+// =======================================================
 // CLINICIAN BULK INTAKE (submit entire testing day at once)
 // =======================================================
 app.post("/clinician/intake", async (req, res) => {
@@ -2869,6 +3158,290 @@ app.get("/clinician/patient/:userId/timeline", async (req, res) => {
   }
 });
 
+// =======================================================
+// BIOLOGICAL AGE CALCULATION SERVICE
+// =======================================================
+
+/**
+ * Helper: Collect latest biomarkers for a user
+ * Searches daily_snapshots + clinic tables for most recent available metrics
+ */
+async function gatherLatestBiomarkers(supabase, userId) {
+  // Fetch latest daily snapshot
+  const { data: snapshots } = await supabase
+    .from("daily_snapshots")
+    .select("*")
+    .eq("user_id", userId)
+    .order("snapshot_date", { ascending: false })
+    .limit(1);
+
+  const snapshot = snapshots?.[0] || {};
+
+  // Fetch latest clinic labs
+  const { data: labsArray } = await supabase
+    .from("lab_results")
+    .select("*")
+    .eq("user_id", userId)
+    .order("collected_at", { ascending: false })
+    .limit(1);
+
+  const labs = labsArray?.[0] || {};
+
+  // Fetch latest functional assessments
+  const { data: gripArray } = await supabase
+    .from("grip_strength_assessments")
+    .select("*")
+    .eq("user_id", userId)
+    .order("measured_at", { ascending: false })
+    .limit(1);
+
+  const grip = gripArray?.[0] || {};
+
+  const { data: gaitArray } = await supabase
+    .from("functional_assessments")
+    .select("*")
+    .eq("user_id", userId)
+    .eq("test_type", "gait_speed")
+    .order("measured_at", { ascending: false })
+    .limit(1);
+
+  const gait = gaitArray?.[0] || {};
+
+  // Fetch latest VO2 assessment
+  const { data: vo2Array } = await supabase
+    .from("vo2_assessments")
+    .select("*")
+    .eq("user_id", userId)
+    .order("measured_at", { ascending: false })
+    .limit(1);
+
+  const vo2 = vo2Array?.[0] || {};
+
+  // Fetch latest tanita body composition
+  const { data: tanitaArray } = await supabase
+    .from("tanita_assessments")
+    .select("*")
+    .eq("user_id", userId)
+    .order("measured_at", { ascending: false })
+    .limit(1);
+
+  const tanita = tanitaArray?.[0] || {};
+
+  // Fetch user profile for DOB/age/sex
+  // For now, we'll return the data and let caller provide chronological age
+  return {
+    snapshot,
+    labs,
+    grip,
+    gait,
+    vo2,
+    tanita,
+  };
+}
+
+/**
+ * GET /biological-age?userId={UUID}
+ * Compute and return latest biological age using most recent available data
+ */
+app.get("/biological-age", async (req, res) => {
+  try {
+    const userId = getAppUserIdFromAny(req.query);
+    if (!userId) {
+      return res.status(400).json({
+        ok: false,
+        error: "missing_or_invalid_userId",
+        message: "Provide a valid userId (UUID) as query param",
+      });
+    }
+
+    const { chronologicalAge, sex } = req.query;
+    if (!chronologicalAge || !sex) {
+      return res.status(400).json({
+        ok: false,
+        error: "missing_params",
+        message: "Provide chronologicalAge and sex query params",
+      });
+    }
+
+    const age = parseInt(chronologicalAge);
+    if (isNaN(age) || age < 18) {
+      return res.status(400).json({
+        ok: false,
+        error: "invalid_age",
+        message: "chronologicalAge must be a number >= 18",
+      });
+    }
+
+    // Gather latest biomarkers
+    const biomarkers = await gatherLatestBiomarkers(supabase, userId);
+
+    // Build wearable metrics object
+    const wearableMetrics = {
+      vo2_max: biomarkers.snapshot.vo2_max ?? biomarkers.vo2.estimated_vo2_ml_kg_min ?? null,
+      hrv: biomarkers.snapshot.hrv ?? null,
+      resting_hr: biomarkers.snapshot.resting_hr ?? null,
+      sleep_total_minutes: biomarkers.snapshot.sleep_total_minutes ?? null,
+      steps: biomarkers.snapshot.steps ?? null,
+      respiratory_rate: biomarkers.snapshot.respiratory_rate ?? null,
+      weight_kg: biomarkers.snapshot.weight_kg ?? biomarkers.tanita.weight_kg ?? null,
+      height_m: null, // Not stored; fallback in computeBiologicalAge
+      body_fat_percent: biomarkers.snapshot.body_fat_percent ?? biomarkers.tanita.body_fat_pct ?? null,
+      bp_systolic: biomarkers.snapshot.bp_systolic ?? null,
+      bp_diastolic: biomarkers.snapshot.bp_diastolic ?? null,
+    };
+
+    // Build clinic labs object
+    const clinicLabs = {
+      hs_crp_mg_l: biomarkers.labs.hs_crp_mg_l ?? null,
+      total_cholesterol: biomarkers.labs.total_cholesterol ?? null,
+      hdl_cholesterol: biomarkers.labs.hdl_cholesterol ?? null,
+      ldl_cholesterol: biomarkers.labs.ldl_cholesterol ?? null,
+      triglycerides: biomarkers.labs.triglycerides ?? null,
+      fasting_glucose_mg_dl: biomarkers.labs.fasting_glucose_mg_dl ?? null,
+      hba1c_pct: biomarkers.labs.hba1c_pct ?? null,
+      bp_systolic: null, // Use wearable if available
+      bp_diastolic: null,
+      body_fat_pct: biomarkers.tanita.body_fat_pct ?? null,
+      grip_strength: null, // See functional assessments
+    };
+
+    // Build functional assessments object
+    const functionalAssessments = {
+      grip_strength: biomarkers.grip.right_best ?? biomarkers.grip.left_best ?? null,
+      gait_speed_ms: biomarkers.gait.gait_speed_ms ?? null,
+      sit_to_stand_seconds: null,
+      six_min_walk_distance_m: null,
+    };
+
+    // Compute biological age
+    const result = computeBiologicalAge({
+      chronologicalAge: age,
+      sex,
+      wearableMetrics,
+      clinicLabs,
+      functionalAssessments,
+    });
+
+    // Store in database
+    const { error: insertError } = await supabase
+      .from("biological_age_history")
+      .insert({
+        user_id: userId,
+        chronological_age: age,
+        biological_age: result.biologicalAge,
+        age_delta: result.ageDelta,
+        confidence: result.confidence,
+        breakdown: result.breakdown,
+        input_data: {
+          wearableMetrics,
+          clinicLabs,
+          functionalAssessments,
+        },
+      });
+
+    if (insertError) {
+      // Log but don't fail the response
+      structuredLog("biological_age_insert_error", {
+        userId,
+        error: insertError.message,
+      });
+    }
+
+    structuredLog("biological_age_computed", {
+      userId,
+      chronologicalAge: age,
+      biologicalAge: result.biologicalAge,
+      ageDelta: result.ageDelta,
+      confidence: result.confidence,
+      metricsCount: result.metricsCount,
+    });
+
+    return res.json({
+      ok: true,
+      biologicalAge: result,
+    });
+  } catch (err) {
+    structuredLog("biological_age_exception", {
+      userId: getAppUserIdFromAny(req.query),
+      error: err.message,
+    });
+    return res.status(500).json({
+      ok: false,
+      error: "internal_error",
+      message: err.message,
+    });
+  }
+});
+
+/**
+ * GET /biological-age/history?userId={UUID}&months=12
+ * Return biological age computations over time (monthly aggregation)
+ */
+app.get("/biological-age/history", async (req, res) => {
+  try {
+    const userId = getAppUserIdFromAny(req.query);
+    if (!userId) {
+      return res.status(400).json({
+        ok: false,
+        error: "missing_or_invalid_userId",
+        message: "Provide a valid userId (UUID) as query param",
+      });
+    }
+
+    const months = Math.min(Math.max(parseInt(req.query.months) || 12, 1), 120);
+    const cutoffDate = new Date();
+    cutoffDate.setMonth(cutoffDate.getMonth() - months);
+
+    const { data, error } = await supabase
+      .from("biological_age_history")
+      .select("*")
+      .eq("user_id", userId)
+      .gte("computed_at", cutoffDate.toISOString())
+      .order("computed_at", { ascending: true });
+
+    if (error) {
+      return res.status(500).json({
+        ok: false,
+        error: "db_query_failed",
+        message: error.message,
+      });
+    }
+
+    // Aggregate by month: pick one record per month (the latest one)
+    const byMonth = new Map();
+    for (const record of data || []) {
+      const date = new Date(record.computed_at);
+      const monthKey = `${date.getUTCFullYear()}-${String(date.getUTCMonth() + 1).padStart(2, '0')}`;
+
+      if (!byMonth.has(monthKey) || new Date(record.computed_at) > new Date(byMonth.get(monthKey).computed_at)) {
+        byMonth.set(monthKey, record);
+      }
+    }
+
+    const history = Array.from(byMonth.values()).sort(
+      (a, b) => new Date(a.computed_at) - new Date(b.computed_at)
+    );
+
+    return res.json({
+      ok: true,
+      userId,
+      months,
+      recordCount: history.length,
+      history,
+    });
+  } catch (err) {
+    structuredLog("biological_age_history_exception", {
+      userId: getAppUserIdFromAny(req.query),
+      error: err.message,
+    });
+    return res.status(500).json({
+      ok: false,
+      error: "internal_error",
+      message: err.message,
+    });
+  }
+});
+
 // --- Debug: list all registered routes ---
 function listRoutes() {
   const out = [];
@@ -2999,8 +3572,35 @@ app.get(/^\/dashboard(\/.*)?$/, (_req, res) => {
   res.sendFile(path.join(__dirname, "public", "dashboard", "index.html"));
 });
 
+// -------------------------------------------------------
+// PROVIDER PORTAL SPA
+// -------------------------------------------------------
+app.use(
+  "/provider",
+  express.static(path.join(__dirname, "public", "provider"))
+);
+app.get(/^\/provider(\/.*)?$/, (_req, res) => {
+  res.sendFile(path.join(__dirname, "public", "provider", "index.html"));
+});
+
 // --- Start server ---
 const PORT = process.env.PORT || 3001;
-app.listen(PORT, () => {
+const server = app.listen(PORT, async () => {
   console.log(`✅ Server running on http://localhost:${PORT}`);
+
+  // Initialize cron jobs for morning readiness notifications
+  const cronStarted = await startCronJobs(supabase, { sendPush });
+  if (cronStarted) {
+    console.log("✓ Morning readiness notification cron initialized");
+  }
+});
+
+// Graceful shutdown
+process.on("SIGTERM", () => {
+  console.log("SIGTERM received, shutting down gracefully...");
+  stopCronJobs();
+  server.close(() => {
+    console.log("Server closed");
+    process.exit(0);
+  });
 });
