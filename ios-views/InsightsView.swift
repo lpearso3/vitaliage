@@ -59,6 +59,12 @@ struct InsightsView: View {
     var body: some View {
         ScrollView {
             VStack(spacing: 16) {
+                // Hero image
+                AppImages.hero(.personalizedInsights, height: 180)
+                    .cornerRadius(16)
+                    .padding(.horizontal)
+                    .padding(.top, 8)
+
                 // Generate button
                 Button {
                     Task { await generateInsights() }

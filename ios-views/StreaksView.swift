@@ -65,6 +65,12 @@ struct StreaksView: View {
     var body: some View {
         ScrollView {
             VStack(spacing: 24) {
+                // Hero image
+                AppImages.hero(.streaksBadges, height: 180)
+                    .cornerRadius(16)
+                    .padding(.horizontal)
+                    .padding(.top, 8)
+
                 // Streaks section
                 VStack(alignment: .leading, spacing: 16) {
                     Label("Current Streaks", systemImage: "flame.fill")

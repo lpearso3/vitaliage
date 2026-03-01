@@ -55,6 +55,12 @@ struct ChallengesView: View {
     var body: some View {
         ScrollView {
             VStack(spacing: 24) {
+                // Hero image
+                AppImages.hero(.weeklyChallenges, height: 180)
+                    .cornerRadius(16)
+                    .padding(.horizontal)
+                    .padding(.top, 8)
+
                 // My active challenges
                 if !myActiveChallenges.isEmpty {
                     VStack(alignment: .leading, spacing: 12) {

@@ -27,6 +27,12 @@ struct MorningCheckInView: View {
     var body: some View {
         ScrollView {
             VStack(spacing: 24) {
+                // Hero image
+                AppImages.hero(.morningCheckin, height: 180)
+                    .cornerRadius(16)
+                    .padding(.horizontal)
+                    .padding(.top, 8)
+
                 // Header
                 VStack(spacing: 8) {
                     Text("\(greeting) ☀️")
@@ -35,7 +41,6 @@ struct MorningCheckInView: View {
                         .font(.subheadline)
                         .foregroundStyle(.secondary)
                 }
-                .padding(.top, 20)
 
                 // Rating sliders
                 ratingRow(title: "Energy", icon: "bolt.fill", color: .orange, value: $energyLevel)
