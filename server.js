@@ -2032,6 +2032,109 @@ function listRoutes() {
 app.get("/__routes", (_req, res) => res.json(listRoutes()));
 
 // -------------------------------------------------------
+// IMAGE ASSETS (served for iOS app)
+// -------------------------------------------------------
+app.use(
+  "/assets/images",
+  express.static(path.join(__dirname, "assets", "images", "web"), {
+    maxAge: "7d",
+    immutable: true,
+  })
+);
+app.use(
+  "/assets/images/ios",
+  express.static(path.join(__dirname, "assets", "images", "ios"), {
+    maxAge: "7d",
+    immutable: true,
+  })
+);
+
+// Image manifest — returns all available app images with URLs
+app.get("/api/images", (req, res) => {
+  const baseUrl = `${req.protocol}://${req.get("host")}`;
+  const images = {
+    onboarding_welcome: {
+      feature: "Onboarding Welcome",
+      web: `${baseUrl}/assets/images/onboarding-welcome.jpg`,
+      ios_1x: `${baseUrl}/assets/images/ios/onboarding-welcome@1x.jpg`,
+      ios_2x: `${baseUrl}/assets/images/ios/onboarding-welcome@2x.jpg`,
+      ios_3x: `${baseUrl}/assets/images/ios/onboarding-welcome@3x.jpg`,
+    },
+    home_today: {
+      feature: "Home / Today Tab",
+      web: `${baseUrl}/assets/images/home-today.jpg`,
+      ios_1x: `${baseUrl}/assets/images/ios/home-today@1x.jpg`,
+      ios_2x: `${baseUrl}/assets/images/ios/home-today@2x.jpg`,
+      ios_3x: `${baseUrl}/assets/images/ios/home-today@3x.jpg`,
+    },
+    sleep_tracking: {
+      feature: "Sleep / History Tab",
+      web: `${baseUrl}/assets/images/sleep-tracking.jpg`,
+      ios_1x: `${baseUrl}/assets/images/ios/sleep-tracking@1x.jpg`,
+      ios_2x: `${baseUrl}/assets/images/ios/sleep-tracking@2x.jpg`,
+      ios_3x: `${baseUrl}/assets/images/ios/sleep-tracking@3x.jpg`,
+    },
+    meditation_breathing: {
+      feature: "Meditation / Breathing",
+      web: `${baseUrl}/assets/images/meditation-breathing.jpg`,
+      ios_1x: `${baseUrl}/assets/images/ios/meditation-breathing@1x.jpg`,
+      ios_2x: `${baseUrl}/assets/images/ios/meditation-breathing@2x.jpg`,
+      ios_3x: `${baseUrl}/assets/images/ios/meditation-breathing@3x.jpg`,
+    },
+    learn_tab: {
+      feature: "Learn Tab",
+      web: `${baseUrl}/assets/images/learn-tab.jpg`,
+      ios_1x: `${baseUrl}/assets/images/ios/learn-tab@1x.jpg`,
+      ios_2x: `${baseUrl}/assets/images/ios/learn-tab@2x.jpg`,
+      ios_3x: `${baseUrl}/assets/images/ios/learn-tab@3x.jpg`,
+    },
+    morning_checkin: {
+      feature: "Morning Check-in",
+      web: `${baseUrl}/assets/images/morning-checkin.jpg`,
+      ios_1x: `${baseUrl}/assets/images/ios/morning-checkin@1x.jpg`,
+      ios_2x: `${baseUrl}/assets/images/ios/morning-checkin@2x.jpg`,
+      ios_3x: `${baseUrl}/assets/images/ios/morning-checkin@3x.jpg`,
+    },
+    streaks_badges: {
+      feature: "Streaks / Badges",
+      web: `${baseUrl}/assets/images/streaks-badges.jpg`,
+      ios_1x: `${baseUrl}/assets/images/ios/streaks-badges@1x.jpg`,
+      ios_2x: `${baseUrl}/assets/images/ios/streaks-badges@2x.jpg`,
+      ios_3x: `${baseUrl}/assets/images/ios/streaks-badges@3x.jpg`,
+    },
+    weekly_challenges: {
+      feature: "Weekly Challenges",
+      web: `${baseUrl}/assets/images/weekly-challenges.jpg`,
+      ios_1x: `${baseUrl}/assets/images/ios/weekly-challenges@1x.jpg`,
+      ios_2x: `${baseUrl}/assets/images/ios/weekly-challenges@2x.jpg`,
+      ios_3x: `${baseUrl}/assets/images/ios/weekly-challenges@3x.jpg`,
+    },
+    personalized_insights: {
+      feature: "Personalized Insights",
+      web: `${baseUrl}/assets/images/personalized-insights.jpg`,
+      ios_1x: `${baseUrl}/assets/images/ios/personalized-insights@1x.jpg`,
+      ios_2x: `${baseUrl}/assets/images/ios/personalized-insights@2x.jpg`,
+      ios_3x: `${baseUrl}/assets/images/ios/personalized-insights@3x.jpg`,
+    },
+    clinician_dashboard: {
+      feature: "Clinician Dashboard",
+      web: `${baseUrl}/assets/images/clinician-dashboard.jpg`,
+      ios_1x: `${baseUrl}/assets/images/ios/clinician-dashboard@1x.jpg`,
+      ios_2x: `${baseUrl}/assets/images/ios/clinician-dashboard@2x.jpg`,
+      ios_3x: `${baseUrl}/assets/images/ios/clinician-dashboard@3x.jpg`,
+    },
+    nutrition_wellness: {
+      feature: "Nutrition / Wellness",
+      web: `${baseUrl}/assets/images/nutrition-wellness.jpg`,
+      ios_1x: `${baseUrl}/assets/images/ios/nutrition-wellness@1x.jpg`,
+      ios_2x: `${baseUrl}/assets/images/ios/nutrition-wellness@2x.jpg`,
+      ios_3x: `${baseUrl}/assets/images/ios/nutrition-wellness@3x.jpg`,
+    },
+  };
+  res.json({ images });
+});
+
+// -------------------------------------------------------
 // STATIC + DASHBOARD SPA (MUST BE AFTER API ROUTES)
 // -------------------------------------------------------
 app.use(express.static(path.join(__dirname, "public")));

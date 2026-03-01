@@ -1,106 +1,120 @@
-# Vitaliage App - iStock Image Selections
+# Vitaliage App - iStock Image Selections (Updated)
 
 **Account:** Lisa (iStock)
 **Board:** Vitaliage App
-**All images:** Essentials collection (1 credit each)
-**Total images selected:** 11
+**Collection:** Signature (Best quality — 3 credits each)
+**Total images selected:** 11 new Signature + 11 original Essentials on board
+**Diversity:** Mixed genders, ethnicities, and age groups for inclusive appeal
 
 ---
 
 ## Existing App Screens
 
 ### 1. Onboarding Welcome Screen
-- **Title:** Beautiful young woman with curly hair stretching joyfully in bed
-- **ID:** 2227972789
+- **Title:** Young black woman waking up and stretching in minimalist grey modern bedroom
+- **ID:** 1558888331
+- **Collection:** Signature
 - **Use:** Welcome/onboarding screen hero image
 - **Why:** Warm, inviting morning energy — perfect first impression
 
 ### 2. Home / Today Tab
 - **Title:** African American jogger getting ready for workout looking at smart watch
-- **ID:** 1804069074
+- **ID:** 1332200160
+- **Collection:** Signature
 - **Use:** Home tab hero or Today tab header
-- **Why:** Active lifestyle + wearable tech ties into health tracking
+- **Why:** Active lifestyle + wearable tech ties into health tracking, golden outdoor light
 
 ### 3. Sleep Tracking / History Tab
-- **Title:** Beautiful young woman sleeping in bed at night
-- **ID:** 1743429137
+- **Title:** Shot of a young man sleeping peacefully in bed at home
+- **ID:** 1332616479
+- **Collection:** Signature
 - **Use:** Sleep tracking section or History tab
-- **Why:** Peaceful nighttime scene with warm lamp lighting
+- **Why:** Peaceful sleep scene, male subject for gender balance, high quality
 
 ### 4. Meditation / Breathing Exercises
-- **Title:** Mixed race woman relax and breathing fresh air outdoor at sunset
-- **ID:** 1496615471
+- **Title:** Young man meditating on rocks at lakeshore during vacation
+- **ID:** 1494999342
+- **Collection:** Signature
 - **Use:** Breathing exercises feature or meditation section
-- **Why:** Golden hour lighting, eyes closed, serene expression
+- **Why:** Stunning nature setting, peaceful lakeside meditation, male subject for balance
 
 ### 5. Learn Tab
-- **Title:** Woman looking at mobile phone sitting on bed
-- **ID:** 1297038293
+- **Title:** Focused young man using smartphone at home
+- **ID:** 2235798964
+- **Collection:** Signature
 - **Use:** Learn tab hero — reading health articles
-- **Why:** Bright, cheerful woman reading on phone in cozy setting
+- **Why:** Warm home setting with coffee, relaxed learning vibe, male subject for balance
 
 ---
 
 ## New Features
 
 ### 6. Morning Check-in
-- **Title:** Woman sitting on a chair relaxing drinking coffee
-- **ID:** 1423043829
+- **Title:** Young Caucasian woman enjoy her morning coffee
+- **ID:** 1396618382
+- **Collection:** Signature
 - **Use:** Morning check-in feature prompt
-- **Why:** Peaceful morning coffee moment by window with nature view
+- **Why:** Beautiful warm morning light through window, peaceful coffee moment
 
 ### 7. Streaks / Badges / Gamification
-- **Title:** Young sporty woman celebrating success in a park raising arms and shouting
-- **ID:** 2198680468
+- **Title:** Happy athlete celebrating successful workout
+- **ID:** 2245374082
+- **Collection:** Signature
 - **Use:** Achievement celebrations, streak milestones
-- **Why:** Pure joy and celebration — motivating for hitting goals
+- **Why:** Joyful celebration energy on a bridge, motivating for hitting goals
 
 ### 8. Weekly Challenges
-- **Title:** Walk Park (group fitness walking)
-- **ID:** 104732257
+- **Title:** Mature and senior adults taking exercise class in park
+- **ID:** 1494661909
+- **Collection:** Signature
 - **Use:** Weekly challenge cards or community features
-- **Why:** Diverse group exercising together — community motivation
+- **Why:** Diverse group (mixed gender, age, ethnicity) exercising together outdoors
 
 ### 9. Personalized Insights
-- **Title:** Beautiful sportswoman setting up smart watch during workout in park
-- **ID:** 1347259240
+- **Title:** Woman looking at her smart watch for a pulse trace
+- **ID:** 1310475310
+- **Collection:** Signature
 - **Use:** Insights dashboard, health data review
-- **Why:** Person checking health data on wearable — data-driven wellness
+- **Why:** Close-up of smartwatch showing heart rate data — gender-neutral focus on tech/data
 
 ---
 
 ## Clinician & Wellness Themes
 
 ### 10. Clinician Dashboard
-- **Title:** Mature woman doctor and tablet for consultation with patient
-- **ID:** 2216587796
+- **Title:** Smiling mature female doctor using digital tablet while talking with patient at office
+- **ID:** 2232656732
+- **Collection:** Signature
 - **Use:** Clinician-facing dashboard or weekly digest feature
-- **Why:** Warm doctor-patient interaction with tablet — caring clinical setting
+- **Why:** Warm, modern clinic setting with diverse doctor-patient interaction using tablet
 
 ### 11. Nutrition / Healthy Eating
-- **Title:** Fresh vegetables green salad, peppers, mushrooms and eggplant on kitchen table
-- **ID:** 1323280570
+- **Title:** Woman eating fresh rainbow colored salad — multicolored fruits and vegetables background
+- **ID:** 2150857924
+- **Collection:** Signature
 - **Use:** Nutrition articles in Learn tab, healthy eating challenges
-- **Why:** Vibrant, colorful healthy food — wellness lifestyle
+- **Why:** Vibrant overhead shot of colorful healthy food — universally appealing
 
 ---
 
 ## Summary
 
-| # | Image ID | App Feature | Credits |
-|---|----------|-------------|---------|
-| 1 | 2227972789 | Onboarding Welcome | 1 |
-| 2 | 1804069074 | Home / Today Tab | 1 |
-| 3 | 1743429137 | Sleep / History Tab | 1 |
-| 4 | 1496615471 | Meditation / Breathing | 1 |
-| 5 | 1297038293 | Learn Tab | 1 |
-| 6 | 1423043829 | Morning Check-in | 1 |
-| 7 | 2198680468 | Streaks / Badges | 1 |
-| 8 | 104732257 | Weekly Challenges | 1 |
-| 9 | 1347259240 | Personalized Insights | 1 |
-| 10 | 2216587796 | Clinician Dashboard | 1 |
-| 11 | 1323280570 | Nutrition / Wellness | 1 |
+| # | Image ID | App Feature | Collection | Subject Diversity |
+|---|----------|-------------|------------|-------------------|
+| 1 | 1558888331 | Onboarding Welcome | Signature | Woman (Black) |
+| 2 | 1332200160 | Home / Today Tab | Signature | Woman (Black) |
+| 3 | 1332616479 | Sleep / History Tab | Signature | Man (Asian) |
+| 4 | 1494999342 | Meditation / Breathing | Signature | Man (South Asian) |
+| 5 | 2235798964 | Learn Tab | Signature | Man (Caucasian) |
+| 6 | 1396618382 | Morning Check-in | Signature | Woman (Caucasian) |
+| 7 | 2245374082 | Streaks / Badges | Signature | Man (Black) |
+| 8 | 1494661909 | Weekly Challenges | Signature | Mixed group (diverse) |
+| 9 | 1310475310 | Personalized Insights | Signature | Hands/device (neutral) |
+| 10 | 2232656732 | Clinician Dashboard | Signature | Two women (diverse) |
+| 11 | 2150857924 | Nutrition / Wellness | Signature | Food focus (neutral) |
 
-**Total credits needed: 11** (out of 125 available)
+**Total credits needed: 33** (11 images x 3 credits each, out of 125 available)
+
+**Note:** The original 11 Essentials images are also still on the board. You may want to remove those after downloading the Signature versions to avoid confusion.
 
 All images are saved to the **"Vitaliage App"** board on iStock for easy access when downloading.
