@@ -307,7 +307,7 @@ function requireApiKey(req, res, next) {
   // Skip auth for health checks and static assets
   const openPaths = ["/", "/ping", "/db-check", "/__routes"];
   if (openPaths.includes(req.path)) return next();
-  if (req.path.startsWith("/dashboard") || req.path.startsWith("/docs")) return next();
+  if (req.path.startsWith("/dashboard") || req.path.startsWith("/docs") || req.path.startsWith("/assets")) return next();
 
   const clientKey = req.headers["x-vitaliage-key"];
   if (!clientKey || clientKey !== API_KEY) {
