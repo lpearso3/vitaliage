@@ -2016,6 +2016,859 @@ app.get("/clinician/patient/:userId/digest", async (req, res) => {
   }
 });
 
+// =======================================================
+// CLINIC TESTING SESSIONS
+// =======================================================
+
+// POST /clinic/sessions — Create a new testing session
+app.post("/clinic/sessions", async (req, res) => {
+  try {
+    const {
+      userId, sessionDate, clinicianId, sessionType = "initial",
+      status = "in_progress", notes,
+      hrRecoveryBest, cardioFitnessCategory, strengthPowerCategory,
+      autonomicBalanceCategory, frailtyRisk, longevityRiskTier,
+      personalizedPlanSummary,
+    } = req.body || {};
+
+    if (!userId) return res.status(400).json({ ok: false, error: "userId_required" });
+    if (!sessionDate) return res.status(400).json({ ok: false, error: "sessionDate_required" });
+
+    const row = {
+      user_id: userId,
+      session_date: sessionDate,
+      clinician_id: clinicianId ?? null,
+      session_type: sessionType,
+      status,
+      notes: notes ?? null,
+      hr_recovery_best: hrRecoveryBest ?? null,
+      cardio_fitness_category: cardioFitnessCategory ?? null,
+      strength_power_category: strengthPowerCategory ?? null,
+      autonomic_balance_category: autonomicBalanceCategory ?? null,
+      frailty_risk: frailtyRisk ?? null,
+      longevity_risk_tier: longevityRiskTier ?? null,
+      personalized_plan_summary: personalizedPlanSummary ?? null,
+    };
+
+    const { data, error } = await supabase.from("testing_sessions").insert(row).select().limit(1);
+    if (error) return res.status(500).json({ ok: false, error: "db_insert_failed", detail: error.message });
+    return res.status(201).json({ ok: true, session: data?.[0] || null });
+  } catch (err) {
+    console.error("Error in POST /clinic/sessions:", err);
+    return res.status(500).json({ ok: false, error: "internal_error", detail: err.message });
+  }
+});
+
+// GET /clinic/sessions — List sessions for a user
+app.get("/clinic/sessions", async (req, res) => {
+  try {
+    const { userId, limit = 20 } = req.query;
+    if (!userId) return res.status(400).json({ ok: false, error: "userId_required" });
+
+    const { data, error } = await supabase
+      .from("testing_sessions")
+      .select("*")
+      .eq("user_id", userId)
+      .order("session_date", { ascending: false })
+      .limit(parseInt(limit));
+
+    if (error) return res.status(500).json({ ok: false, error: error.message });
+    return res.json({ ok: true, sessions: data || [] });
+  } catch (err) {
+    return res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
+// GET /clinic/sessions/:id — Get full session with all linked test results
+app.get("/clinic/sessions/:id", async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    const [session, functional, vo2, labs, bodyComp, conneqt, grip, officeMeas, plans] = await Promise.all([
+      supabase.from("testing_sessions").select("*").eq("id", id).single(),
+      supabase.from("functional_assessments").select("*").eq("session_id", id).order("measured_at"),
+      supabase.from("vo2_assessments").select("*").eq("session_id", id).order("measured_at"),
+      supabase.from("lab_results").select("*").eq("session_id", id).order("collected_at"),
+      supabase.from("tanita_assessments").select("*").eq("session_id", id).order("measured_at"),
+      supabase.from("conneqt_assessments").select("*").eq("session_id", id).order("measured_at"),
+      supabase.from("grip_strength_assessments").select("*").eq("session_id", id).order("measured_at"),
+      supabase.from("office_measurements").select("*").eq("session_id", id).order("measured_at"),
+      supabase.from("care_plans").select("*").eq("session_id", id).order("created_at"),
+    ]);
+
+    if (session.error) return res.status(404).json({ ok: false, error: "session_not_found" });
+
+    return res.json({
+      ok: true,
+      session: session.data,
+      assessments: {
+        functional: functional.data || [],
+        vo2: vo2.data || [],
+        labs: labs.data || [],
+        body_composition: bodyComp.data || [],
+        conneqt: conneqt.data || [],
+        grip_strength: grip.data || [],
+        office_measurements: officeMeas.data || [],
+      },
+      plans: plans.data || [],
+    });
+  } catch (err) {
+    return res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
+// PATCH /clinic/sessions/:id — Update session status, risk tier, notes
+app.patch("/clinic/sessions/:id", async (req, res) => {
+  try {
+    const { id } = req.params;
+    const updates = {};
+    const allowed = [
+      "status", "notes", "clinicianId", "sessionType",
+      "hrRecoveryBest", "cardioFitnessCategory", "strengthPowerCategory",
+      "autonomicBalanceCategory", "frailtyRisk", "longevityRiskTier",
+      "personalizedPlanSummary",
+    ];
+    const fieldMap = {
+      clinicianId: "clinician_id", sessionType: "session_type",
+      hrRecoveryBest: "hr_recovery_best", cardioFitnessCategory: "cardio_fitness_category",
+      strengthPowerCategory: "strength_power_category",
+      autonomicBalanceCategory: "autonomic_balance_category",
+      frailtyRisk: "frailty_risk", longevityRiskTier: "longevity_risk_tier",
+      personalizedPlanSummary: "personalized_plan_summary",
+    };
+
+    for (const key of allowed) {
+      if (req.body[key] !== undefined) {
+        updates[fieldMap[key] || key] = req.body[key];
+      }
+    }
+    updates.updated_at = new Date().toISOString();
+
+    const { data, error } = await supabase.from("testing_sessions").update(updates).eq("id", id).select().single();
+    if (error) return res.status(500).json({ ok: false, error: error.message });
+    return res.json({ ok: true, session: data });
+  } catch (err) {
+    return res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
+// GET /clinic/sessions/:id/compare/:compareId — Compare two sessions
+app.get("/clinic/sessions/:id/compare/:compareId", async (req, res) => {
+  try {
+    const { id, compareId } = req.params;
+
+    const fetchSession = async (sid) => {
+      const [s, fn, v, lb, bc, cq, gr] = await Promise.all([
+        supabase.from("testing_sessions").select("*").eq("id", sid).single(),
+        supabase.from("functional_assessments").select("*").eq("session_id", sid),
+        supabase.from("vo2_assessments").select("*").eq("session_id", sid),
+        supabase.from("lab_results").select("*").eq("session_id", sid),
+        supabase.from("tanita_assessments").select("*").eq("session_id", sid),
+        supabase.from("conneqt_assessments").select("*").eq("session_id", sid),
+        supabase.from("grip_strength_assessments").select("*").eq("session_id", sid),
+      ]);
+      return {
+        session: s.data, functional: fn.data || [], vo2: v.data || [],
+        labs: lb.data || [], body_composition: bc.data || [],
+        conneqt: cq.data || [], grip_strength: gr.data || [],
+      };
+    };
+
+    const [current, previous] = await Promise.all([fetchSession(id), fetchSession(compareId)]);
+    if (!current.session || !previous.session) {
+      return res.status(404).json({ ok: false, error: "one_or_both_sessions_not_found" });
+    }
+
+    return res.json({ ok: true, current, previous });
+  } catch (err) {
+    return res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
+// =======================================================
+// FUNCTIONAL ASSESSMENTS (Sit-to-Stand, Gait, 6MWT)
+// =======================================================
+
+app.post("/clinic/functional", async (req, res) => {
+  try {
+    const p = req.body || {};
+    const { userId, sessionId, testType, measuredAt } = p;
+
+    if (!userId) return res.status(400).json({ ok: false, error: "userId_required" });
+    if (!testType || !["sit_to_stand", "gait_speed", "six_min_walk"].includes(testType)) {
+      return res.status(400).json({ ok: false, error: "invalid_test_type", allowed: ["sit_to_stand", "gait_speed", "six_min_walk"] });
+    }
+
+    const tsIso = toIsoOrNull(measuredAt) || new Date().toISOString();
+    const dk = dayKeyUtc(tsIso);
+
+    const row = {
+      user_id: userId,
+      session_id: sessionId ?? null,
+      test_type: testType,
+      measured_at: tsIso,
+      day_key: dk,
+      // Sit-to-Stand
+      sts_time_seconds: p.stsTimeSeconds ?? null,
+      sts_hands_used: p.stsHandsUsed ?? null,
+      sts_balance_loss: p.stsBalanceLoss ?? null,
+      sts_immediate_hr: p.stsImmediateHr ?? null,
+      sts_chair_height_cm: p.stsChairHeightCm ?? null,
+      // Gait Speed
+      gait_time_seconds: p.gaitTimeSeconds ?? null,
+      gait_speed_ms: p.gaitSpeedMs ?? null,
+      gait_assistive_device: p.gaitAssistiveDevice ?? null,
+      gait_interpretation: p.gaitInterpretation ?? null,
+      // 6-Min Walk
+      walk_distance_meters: p.walkDistanceMeters ?? null,
+      walk_percent_predicted: p.walkPercentPredicted ?? null,
+      walk_peak_hr: p.walkPeakHr ?? null,
+      walk_recovery_hr_1min: p.walkRecoveryHr1min ?? null,
+      walk_post_rpe: p.walkPostRpe ?? null,
+      walk_symptoms: p.walkSymptoms ?? null,
+      // Common
+      percentile_age_sex: p.percentileAgeSex ?? null,
+      interpretation: p.interpretation ?? null,
+      notes: p.notes ?? null,
+      raw_json: p,
+    };
+
+    const { data, error } = await supabase.from("functional_assessments").insert(row).select("id,user_id,test_type,measured_at").limit(1);
+    if (error) return res.status(500).json({ ok: false, error: "db_insert_failed", detail: error.message });
+    return res.status(201).json({ ok: true, assessment: data?.[0] || null });
+  } catch (err) {
+    console.error("Error in POST /clinic/functional:", err);
+    return res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
+app.get("/clinic/functional", async (req, res) => {
+  try {
+    const { userId, type, sessionId, limit = 50 } = req.query;
+    if (!userId) return res.status(400).json({ ok: false, error: "userId_required" });
+
+    let query = supabase.from("functional_assessments").select("*").eq("user_id", userId);
+    if (type) query = query.eq("test_type", type);
+    if (sessionId) query = query.eq("session_id", sessionId);
+    query = query.order("measured_at", { ascending: false }).limit(parseInt(limit));
+
+    const { data, error } = await query;
+    if (error) return res.status(500).json({ ok: false, error: error.message });
+    return res.json({ ok: true, assessments: data || [] });
+  } catch (err) {
+    return res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
+app.get("/clinic/functional/trends", async (req, res) => {
+  try {
+    const { userId, type } = req.query;
+    if (!userId) return res.status(400).json({ ok: false, error: "userId_required" });
+    if (!type) return res.status(400).json({ ok: false, error: "type_required" });
+
+    const { data, error } = await supabase
+      .from("functional_assessments")
+      .select("*")
+      .eq("user_id", userId)
+      .eq("test_type", type)
+      .not("session_id", "is", null)
+      .order("measured_at", { ascending: true });
+
+    if (error) return res.status(500).json({ ok: false, error: error.message });
+    return res.json({ ok: true, trend: data || [] });
+  } catch (err) {
+    return res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
+// =======================================================
+// VO2 ASSESSMENTS (Submaximal Bike Test)
+// =======================================================
+
+app.post("/clinic/vo2", async (req, res) => {
+  try {
+    const p = req.body || {};
+    const { userId, sessionId, measuredAt } = p;
+
+    if (!userId) return res.status(400).json({ ok: false, error: "userId_required" });
+
+    const tsIso = toIsoOrNull(measuredAt) || new Date().toISOString();
+    const dk = dayKeyUtc(tsIso);
+
+    const row = {
+      user_id: userId,
+      session_id: sessionId ?? null,
+      measured_at: tsIso,
+      day_key: dk,
+      protocol: p.protocol ?? "precor_watt",
+      final_workload_watts: p.finalWorkloadWatts ?? null,
+      minute_2_hr: p.minute2Hr ?? null,
+      minute_3_hr: p.minute3Hr ?? null,
+      kgm_per_min: p.kgmPerMin ?? null,
+      estimated_vo2_ml_kg_min: p.estimatedVo2MlKgMin ?? null,
+      age_adjusted_interpretation: p.ageAdjustedInterpretation ?? null,
+      hr_recovery_1min: p.hrRecovery1min ?? null,
+      hr_recovery_best: p.hrRecoveryBest ?? null,
+      cardio_fitness_category: p.cardioFitnessCategory ?? null,
+      notes: p.notes ?? null,
+      raw_json: p,
+    };
+
+    const { data, error } = await supabase.from("vo2_assessments").insert(row).select("id,user_id,measured_at,estimated_vo2_ml_kg_min").limit(1);
+    if (error) return res.status(500).json({ ok: false, error: "db_insert_failed", detail: error.message });
+    return res.status(201).json({ ok: true, assessment: data?.[0] || null });
+  } catch (err) {
+    console.error("Error in POST /clinic/vo2:", err);
+    return res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
+app.get("/clinic/vo2", async (req, res) => {
+  try {
+    const { userId, sessionId, limit = 20 } = req.query;
+    if (!userId) return res.status(400).json({ ok: false, error: "userId_required" });
+
+    let query = supabase.from("vo2_assessments").select("*").eq("user_id", userId);
+    if (sessionId) query = query.eq("session_id", sessionId);
+    query = query.order("measured_at", { ascending: false }).limit(parseInt(limit));
+
+    const { data, error } = await query;
+    if (error) return res.status(500).json({ ok: false, error: error.message });
+    return res.json({ ok: true, assessments: data || [] });
+  } catch (err) {
+    return res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
+app.get("/clinic/vo2/trends", async (req, res) => {
+  try {
+    const { userId } = req.query;
+    if (!userId) return res.status(400).json({ ok: false, error: "userId_required" });
+
+    const { data, error } = await supabase
+      .from("vo2_assessments")
+      .select("*")
+      .eq("user_id", userId)
+      .not("session_id", "is", null)
+      .order("measured_at", { ascending: true });
+
+    if (error) return res.status(500).json({ ok: false, error: error.message });
+    return res.json({ ok: true, trend: data || [] });
+  } catch (err) {
+    return res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
+// =======================================================
+// LAB RESULTS (Blood Work & Biomarkers)
+// =======================================================
+
+app.post("/clinic/labs", async (req, res) => {
+  try {
+    const p = req.body || {};
+    const { userId, sessionId, collectedAt } = p;
+
+    if (!userId) return res.status(400).json({ ok: false, error: "userId_required" });
+
+    const tsIso = toIsoOrNull(collectedAt) || new Date().toISOString();
+    const dk = dayKeyUtc(tsIso);
+
+    const row = {
+      user_id: userId,
+      session_id: sessionId ?? null,
+      collected_at: tsIso,
+      day_key: dk,
+      lab_name: p.labName ?? null,
+      // Metabolic
+      hba1c_pct: p.hba1cPct ?? null,
+      fasting_glucose_mg_dl: p.fastingGlucoseMgDl ?? null,
+      insulin_uiu_ml: p.insulinUiuMl ?? null,
+      homa_ir: p.homaIr ?? null,
+      // Lipids
+      total_cholesterol: p.totalCholesterol ?? null,
+      ldl_cholesterol: p.ldlCholesterol ?? null,
+      hdl_cholesterol: p.hdlCholesterol ?? null,
+      triglycerides: p.triglycerides ?? null,
+      apob_mg_dl: p.apobMgDl ?? null,
+      lpa_nmol_l: p.lpaNmolL ?? null,
+      // Inflammation
+      hs_crp_mg_l: p.hsCrpMgL ?? null,
+      homocysteine_umol_l: p.homocysteineUmolL ?? null,
+      // Hormones
+      testosterone_ng_dl: p.testosteroneNgDl ?? null,
+      free_testosterone: p.freeTestosterone ?? null,
+      dhea_s: p.dheaS ?? null,
+      cortisol_am: p.cortisolAm ?? null,
+      tsh: p.tsh ?? null,
+      vitamin_d_ng_ml: p.vitaminDNgMl ?? null,
+      // Flexible
+      additional_results: p.additionalResults ?? null,
+      report_pdf_url: p.reportPdfUrl ?? null,
+      notes: p.notes ?? null,
+      raw_json: p,
+    };
+
+    const { data, error } = await supabase.from("lab_results").insert(row).select("id,user_id,collected_at,day_key").limit(1);
+    if (error) return res.status(500).json({ ok: false, error: "db_insert_failed", detail: error.message });
+    return res.status(201).json({ ok: true, labResult: data?.[0] || null });
+  } catch (err) {
+    console.error("Error in POST /clinic/labs:", err);
+    return res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
+app.get("/clinic/labs", async (req, res) => {
+  try {
+    const { userId, sessionId, limit = 20 } = req.query;
+    if (!userId) return res.status(400).json({ ok: false, error: "userId_required" });
+
+    let query = supabase.from("lab_results").select("*").eq("user_id", userId);
+    if (sessionId) query = query.eq("session_id", sessionId);
+    query = query.order("collected_at", { ascending: false }).limit(parseInt(limit));
+
+    const { data, error } = await query;
+    if (error) return res.status(500).json({ ok: false, error: error.message });
+    return res.json({ ok: true, labResults: data || [] });
+  } catch (err) {
+    return res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
+app.get("/clinic/labs/trends", async (req, res) => {
+  try {
+    const { userId, metric } = req.query;
+    if (!userId) return res.status(400).json({ ok: false, error: "userId_required" });
+
+    const { data, error } = await supabase
+      .from("lab_results")
+      .select("*")
+      .eq("user_id", userId)
+      .order("collected_at", { ascending: true });
+
+    if (error) return res.status(500).json({ ok: false, error: error.message });
+
+    // If a specific metric requested, extract just that column trend
+    if (metric && data) {
+      const trend = data
+        .filter((r) => r[metric] != null)
+        .map((r) => ({ date: r.day_key, value: r[metric], session_id: r.session_id }));
+      return res.json({ ok: true, metric, trend });
+    }
+
+    return res.json({ ok: true, labResults: data || [] });
+  } catch (err) {
+    return res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
+// =======================================================
+// CARE PLANS (Workout, Nutrition, Lifestyle)
+// =======================================================
+
+app.post("/clinic/plans", async (req, res) => {
+  try {
+    const p = req.body || {};
+    const { userId, sessionId, planType } = p;
+
+    if (!userId) return res.status(400).json({ ok: false, error: "userId_required" });
+    if (!planType || !["workout", "nutrition", "lifestyle", "combined"].includes(planType)) {
+      return res.status(400).json({ ok: false, error: "invalid_plan_type" });
+    }
+
+    // Supersede any existing active plan of the same type for this user
+    if (p.supersedePrevious !== false) {
+      await supabase
+        .from("care_plans")
+        .update({ status: "superseded", updated_at: new Date().toISOString() })
+        .eq("user_id", userId)
+        .eq("plan_type", planType)
+        .eq("status", "active");
+    }
+
+    const row = {
+      user_id: userId,
+      session_id: sessionId ?? null,
+      plan_type: planType,
+      title: p.title ?? null,
+      summary: p.summary ?? null,
+      plan_body: p.planBody ?? null,
+      goals: p.goals ?? null,
+      start_date: p.startDate ?? null,
+      end_date: p.endDate ?? null,
+      status: "active",
+      adherence_pct: null,
+      pdf_url: p.pdfUrl ?? null,
+      created_by: p.createdBy ?? null,
+    };
+
+    const { data, error } = await supabase.from("care_plans").insert(row).select().limit(1);
+    if (error) return res.status(500).json({ ok: false, error: "db_insert_failed", detail: error.message });
+    return res.status(201).json({ ok: true, plan: data?.[0] || null });
+  } catch (err) {
+    console.error("Error in POST /clinic/plans:", err);
+    return res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
+app.get("/clinic/plans", async (req, res) => {
+  try {
+    const { userId, status = "active", limit = 20 } = req.query;
+    if (!userId) return res.status(400).json({ ok: false, error: "userId_required" });
+
+    let query = supabase.from("care_plans").select("*").eq("user_id", userId);
+    if (status !== "all") query = query.eq("status", status);
+    query = query.order("created_at", { ascending: false }).limit(parseInt(limit));
+
+    const { data, error } = await query;
+    if (error) return res.status(500).json({ ok: false, error: error.message });
+    return res.json({ ok: true, plans: data || [] });
+  } catch (err) {
+    return res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
+app.get("/clinic/plans/:id", async (req, res) => {
+  try {
+    const { data, error } = await supabase.from("care_plans").select("*").eq("id", req.params.id).single();
+    if (error) return res.status(404).json({ ok: false, error: "plan_not_found" });
+    return res.json({ ok: true, plan: data });
+  } catch (err) {
+    return res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
+app.patch("/clinic/plans/:id", async (req, res) => {
+  try {
+    const updates = {};
+    const allowed = ["title", "summary", "planBody", "goals", "startDate", "endDate", "status", "adherencePct", "pdfUrl"];
+    const fieldMap = {
+      planBody: "plan_body", startDate: "start_date", endDate: "end_date",
+      adherencePct: "adherence_pct", pdfUrl: "pdf_url",
+    };
+
+    for (const key of allowed) {
+      if (req.body[key] !== undefined) updates[fieldMap[key] || key] = req.body[key];
+    }
+    updates.updated_at = new Date().toISOString();
+
+    const { data, error } = await supabase.from("care_plans").update(updates).eq("id", req.params.id).select().single();
+    if (error) return res.status(500).json({ ok: false, error: error.message });
+    return res.json({ ok: true, plan: data });
+  } catch (err) {
+    return res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
+// GET /clinic/plans/:id/progress — Calculate plan adherence from wearable + check-in data
+app.get("/clinic/plans/:id/progress", async (req, res) => {
+  try {
+    const { data: plan, error: planErr } = await supabase.from("care_plans").select("*").eq("id", req.params.id).single();
+    if (planErr || !plan) return res.status(404).json({ ok: false, error: "plan_not_found" });
+
+    const goals = plan.goals || [];
+    const userId = plan.user_id;
+
+    // Fetch latest daily snapshot for wearable data
+    const { data: snapshots } = await supabase
+      .from("daily_snapshots")
+      .select("*")
+      .eq("user_id", userId)
+      .order("snapshot_date", { ascending: false })
+      .limit(1);
+
+    const latest = snapshots?.[0] || {};
+
+    // Fetch latest clinic assessments for clinic-tracked goals
+    const [latestGrip, latestVo2, latestBodyComp] = await Promise.all([
+      supabase.from("grip_strength_assessments").select("*").eq("user_id", userId).order("measured_at", { ascending: false }).limit(1),
+      supabase.from("vo2_assessments").select("*").eq("user_id", userId).order("measured_at", { ascending: false }).limit(1),
+      supabase.from("tanita_assessments").select("*").eq("user_id", userId).order("measured_at", { ascending: false }).limit(1),
+    ]);
+
+    // Map metric names to current values
+    const currentValues = {
+      steps: latest.steps,
+      sleep_total_minutes: latest.sleep_total_minutes,
+      resting_hr: latest.resting_hr,
+      hrv: latest.hrv,
+      weight_kg: latest.weight_kg ?? latestBodyComp.data?.[0]?.weight_kg,
+      body_fat_pct: latest.body_fat_percent ?? latestBodyComp.data?.[0]?.body_fat_pct,
+      grip_right_kg: latestGrip.data?.[0]?.right_best,
+      grip_left_kg: latestGrip.data?.[0]?.left_best,
+      vo2_ml_kg_min: latestVo2.data?.[0]?.estimated_vo2_ml_kg_min,
+      muscle_mass_kg: latestBodyComp.data?.[0]?.muscle_mass_kg,
+    };
+
+    const goalProgress = goals.map((g) => {
+      const current = currentValues[g.metric] ?? null;
+      const baseline = g.baseline;
+      const target = g.target;
+      let progressPct = null;
+
+      if (current != null && baseline != null && target != null && target !== baseline) {
+        progressPct = Math.round(((current - baseline) / (target - baseline)) * 100);
+        progressPct = Math.max(0, Math.min(progressPct, 200)); // cap at 200%
+      }
+
+      return { ...g, current, progress_pct: progressPct };
+    });
+
+    const validGoals = goalProgress.filter((g) => g.progress_pct != null);
+    const overallAdherence = validGoals.length > 0
+      ? Math.round(validGoals.reduce((sum, g) => sum + g.progress_pct, 0) / validGoals.length)
+      : null;
+
+    return res.json({
+      ok: true,
+      plan_id: plan.id,
+      plan_type: plan.plan_type,
+      goals: goalProgress,
+      overall_adherence_pct: overallAdherence,
+      days_remaining: plan.end_date ? Math.max(0, Math.ceil((new Date(plan.end_date) - new Date()) / 86400000)) : null,
+    });
+  } catch (err) {
+    return res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
+// =======================================================
+// CLINICIAN BULK INTAKE (submit entire testing day at once)
+// =======================================================
+app.post("/clinician/intake", async (req, res) => {
+  try {
+    const p = req.body || {};
+    const { userId, sessionDate, clinicianId } = p;
+
+    if (!userId) return res.status(400).json({ ok: false, error: "userId_required" });
+    if (!sessionDate) return res.status(400).json({ ok: false, error: "sessionDate_required" });
+
+    // 1. Create the testing session
+    const { data: sessionData, error: sessionErr } = await supabase
+      .from("testing_sessions")
+      .insert({
+        user_id: userId,
+        session_date: sessionDate,
+        clinician_id: clinicianId ?? null,
+        session_type: p.sessionType ?? "initial",
+        status: "completed",
+        notes: p.notes ?? null,
+        hr_recovery_best: p.hrRecoveryBest ?? null,
+        cardio_fitness_category: p.cardioFitnessCategory ?? null,
+        strength_power_category: p.strengthPowerCategory ?? null,
+        autonomic_balance_category: p.autonomicBalanceCategory ?? null,
+        frailty_risk: p.frailtyRisk ?? null,
+        longevity_risk_tier: p.longevityRiskTier ?? null,
+        personalized_plan_summary: p.personalizedPlanSummary ?? null,
+      })
+      .select()
+      .single();
+
+    if (sessionErr) return res.status(500).json({ ok: false, error: "session_create_failed", detail: sessionErr.message });
+    const sessionId = sessionData.id;
+    const results = { session: sessionData };
+
+    const tsIso = new Date(sessionDate).toISOString();
+    const dk = sessionDate; // Already YYYY-MM-DD
+
+    // 2. Insert resting vitals (office measurements) if provided
+    if (p.restingVitals) {
+      const rv = p.restingVitals;
+      const { data, error } = await supabase.from("office_measurements").insert({
+        user_id: userId, session_id: sessionId, measured_at: tsIso, day_key: dk,
+        bp_systolic: rv.bpSystolic ?? null, bp_diastolic: rv.bpDiastolic ?? null,
+        weight_kg: rv.weightKg ?? null, body_fat_pct: rv.bodyFatPct ?? null,
+        resting_hr: rv.restingHr ?? null, spo2_pct: rv.spo2Pct ?? null,
+        rpe_baseline: rv.rpeBaseline ?? null, height_cm: rv.heightCm ?? null,
+        device: "Manual", raw_json: rv,
+      }).select("id").limit(1);
+      results.resting_vitals = data?.[0] || { error: error?.message };
+    }
+
+    // 3. Insert CONNEQT HRV if provided
+    if (p.conneqt) {
+      const c = p.conneqt;
+      const { data, error } = await supabase.from("conneqt_assessments").insert({
+        user_id: userId, session_id: sessionId, measured_at: tsIso, day_key: dk,
+        source: "CONNEQT", device: c.device ?? "CONNEQT Pulse",
+        brachial_systolic: c.brachialSystolic ?? null, brachial_diastolic: c.brachialDiastolic ?? null,
+        central_systolic: c.centralSystolic ?? null, central_diastolic: c.centralDiastolic ?? null,
+        heart_rate: c.heartRate ?? null,
+        augmentation_index: c.augmentationIndex ?? null, augmentation_pressure: c.augmentationPressure ?? null,
+        pulse_pressure_amplification: c.pulsePressureAmplification ?? null,
+        sevr: c.sevr ?? null, central_pulse_pressure: c.centralPulsePressure ?? null,
+        arterial_age: c.arterialAge ?? null,
+        recording_duration_min: c.recordingDurationMin ?? null,
+        hrv_ms: c.hrvMs ?? null, rmssd: c.rmssd ?? null,
+        stress_index: c.stressIndex ?? null, signal_quality: c.signalQuality ?? null,
+        cv_risk_zone: c.cvRiskZone ?? null,
+        central_bp_classification: c.centralBpClassification ?? null,
+        brachial_bp_classification: c.brachialBpClassification ?? null,
+        ppa_classification: c.ppaClassification ?? null,
+        aug_pressure_classification: c.augPressureClassification ?? null,
+        aug_index_classification: c.augIndexClassification ?? null,
+        sevr_classification: c.sevrClassification ?? null,
+        report_pdf_url: c.reportPdfUrl ?? null, report_date: c.reportDate ?? null,
+        raw_json: c,
+      }).select("id").limit(1);
+      results.conneqt = data?.[0] || { error: error?.message };
+    }
+
+    // 4. Insert grip strength if provided
+    if (p.gripStrength) {
+      const g = p.gripStrength;
+      const { data, error } = await supabase.from("grip_strength_assessments").insert({
+        user_id: userId, session_id: sessionId, measured_at: tsIso, day_key: dk,
+        source: "JAMAR", device: g.device ?? "Jamar", unit: g.unit ?? "kgf",
+        left_best: g.leftBest ?? null, right_best: g.rightBest ?? null,
+        left_attempts: g.leftAttempts ?? null, right_attempts: g.rightAttempts ?? null,
+        dominant_hand: g.dominantHand ?? null, grip_to_bw_ratio: g.gripToBwRatio ?? null,
+        percentile_age_sex: g.percentileAgeSex ?? null, notes: g.notes ?? null,
+        raw_json: g,
+      }).select("id").limit(1);
+      results.grip_strength = data?.[0] || { error: error?.message };
+    }
+
+    // 5. Insert functional tests if provided
+    if (p.sitToStand) {
+      const s = p.sitToStand;
+      const { data, error } = await supabase.from("functional_assessments").insert({
+        user_id: userId, session_id: sessionId, test_type: "sit_to_stand",
+        measured_at: tsIso, day_key: dk,
+        sts_time_seconds: s.timeSeconds ?? null, sts_hands_used: s.handsUsed ?? null,
+        sts_balance_loss: s.balanceLoss ?? null, sts_immediate_hr: s.immediateHr ?? null,
+        sts_chair_height_cm: s.chairHeightCm ?? null,
+        percentile_age_sex: s.percentileAgeSex ?? null,
+        interpretation: s.interpretation ?? null, notes: s.notes ?? null, raw_json: s,
+      }).select("id").limit(1);
+      results.sit_to_stand = data?.[0] || { error: error?.message };
+    }
+
+    if (p.gaitSpeed) {
+      const g = p.gaitSpeed;
+      const { data, error } = await supabase.from("functional_assessments").insert({
+        user_id: userId, session_id: sessionId, test_type: "gait_speed",
+        measured_at: tsIso, day_key: dk,
+        gait_time_seconds: g.timeSeconds ?? null, gait_speed_ms: g.speedMs ?? null,
+        gait_assistive_device: g.assistiveDevice ?? null, gait_interpretation: g.interpretation ?? null,
+        percentile_age_sex: g.percentileAgeSex ?? null, notes: g.notes ?? null, raw_json: g,
+      }).select("id").limit(1);
+      results.gait_speed = data?.[0] || { error: error?.message };
+    }
+
+    if (p.sixMinWalk) {
+      const w = p.sixMinWalk;
+      const { data, error } = await supabase.from("functional_assessments").insert({
+        user_id: userId, session_id: sessionId, test_type: "six_min_walk",
+        measured_at: tsIso, day_key: dk,
+        walk_distance_meters: w.distanceMeters ?? null, walk_percent_predicted: w.percentPredicted ?? null,
+        walk_peak_hr: w.peakHr ?? null, walk_recovery_hr_1min: w.recoveryHr1min ?? null,
+        walk_post_rpe: w.postRpe ?? null, walk_symptoms: w.symptoms ?? null,
+        percentile_age_sex: w.percentileAgeSex ?? null, notes: w.notes ?? null, raw_json: w,
+      }).select("id").limit(1);
+      results.six_min_walk = data?.[0] || { error: error?.message };
+    }
+
+    // 6. Insert VO2 bike test if provided
+    if (p.vo2) {
+      const v = p.vo2;
+      const { data, error } = await supabase.from("vo2_assessments").insert({
+        user_id: userId, session_id: sessionId, measured_at: tsIso, day_key: dk,
+        protocol: v.protocol ?? "precor_watt",
+        final_workload_watts: v.finalWorkloadWatts ?? null,
+        minute_2_hr: v.minute2Hr ?? null, minute_3_hr: v.minute3Hr ?? null,
+        kgm_per_min: v.kgmPerMin ?? null,
+        estimated_vo2_ml_kg_min: v.estimatedVo2MlKgMin ?? null,
+        age_adjusted_interpretation: v.ageAdjustedInterpretation ?? null,
+        hr_recovery_1min: v.hrRecovery1min ?? null, hr_recovery_best: v.hrRecoveryBest ?? null,
+        cardio_fitness_category: v.cardioFitnessCategory ?? null,
+        notes: v.notes ?? null, raw_json: v,
+      }).select("id").limit(1);
+      results.vo2 = data?.[0] || { error: error?.message };
+    }
+
+    // 7. Insert body composition if provided
+    if (p.bodyComposition) {
+      const b = p.bodyComposition;
+      const { data, error } = await supabase.from("tanita_assessments").insert({
+        user_id: userId, session_id: sessionId, measured_at: tsIso, day_key: dk,
+        source: b.source ?? "CHARDER", device: b.device ?? "Charder MA601",
+        weight_kg: b.weightKg ?? null, body_fat_pct: b.bodyFatPct ?? null,
+        fat_mass_kg: b.fatMassKg ?? null, fat_free_mass_kg: b.fatFreeMassKg ?? null,
+        muscle_mass_kg: b.muscleMassKg ?? null, tbw_pct: b.tbwPct ?? null, tbw_kg: b.tbwKg ?? null,
+        visceral_fat_rating: b.visceralFatRating ?? null, bmr_kcal: b.bmrKcal ?? null,
+        metabolic_age: b.metabolicAge ?? null,
+        // Charder-specific
+        icw_lbs: b.icwLbs ?? null, ecw_lbs: b.ecwLbs ?? null,
+        protein_lbs: b.proteinLbs ?? null, mineral_lbs: b.mineralLbs ?? null,
+        slm_lbs: b.slmLbs ?? null, smm_lbs: b.smmLbs ?? null,
+        phase_angle_deg: b.phaseAngleDeg ?? null, ffm_index: b.ffmIndex ?? null,
+        smi: b.smi ?? null, asmi: b.asmi ?? null, bmi: b.bmi ?? null,
+        vfa_rating: b.vfaRating ?? null, total_energy_expenditure: b.totalEnergyExpenditure ?? null,
+        health_score: b.healthScore ?? null, muscle_quality_score: b.muscleQualityScore ?? null,
+        target_weight_lbs: b.targetWeightLbs ?? null,
+        weight_control_lbs: b.weightControlLbs ?? null,
+        fat_control_lbs: b.fatControlLbs ?? null,
+        muscle_control_lbs: b.muscleControlLbs ?? null,
+        segmental_lean: b.segmentalLean ?? null, segmental_fat: b.segmentalFat ?? null,
+        body_balance: b.bodyBalance ?? null, impedance_data: b.impedanceData ?? null,
+        grip_right_n: b.gripRightN ?? null, grip_left_n: b.gripLeftN ?? null,
+        grip_right_lbf: b.gripRightLbf ?? null, grip_left_lbf: b.gripLeftLbf ?? null,
+        raw_json: b,
+      }).select("id").limit(1);
+      results.body_composition = data?.[0] || { error: error?.message };
+    }
+
+    // 8. Insert lab results if provided
+    if (p.labs) {
+      const l = p.labs;
+      const { data, error } = await supabase.from("lab_results").insert({
+        user_id: userId, session_id: sessionId, collected_at: tsIso, day_key: dk,
+        lab_name: l.labName ?? null,
+        hba1c_pct: l.hba1cPct ?? null, fasting_glucose_mg_dl: l.fastingGlucoseMgDl ?? null,
+        insulin_uiu_ml: l.insulinUiuMl ?? null, homa_ir: l.homaIr ?? null,
+        total_cholesterol: l.totalCholesterol ?? null, ldl_cholesterol: l.ldlCholesterol ?? null,
+        hdl_cholesterol: l.hdlCholesterol ?? null, triglycerides: l.triglycerides ?? null,
+        apob_mg_dl: l.apobMgDl ?? null, lpa_nmol_l: l.lpaNmolL ?? null,
+        hs_crp_mg_l: l.hsCrpMgL ?? null, homocysteine_umol_l: l.homocysteineUmolL ?? null,
+        testosterone_ng_dl: l.testosteroneNgDl ?? null, free_testosterone: l.freeTestosterone ?? null,
+        dhea_s: l.dheaS ?? null, cortisol_am: l.cortisolAm ?? null,
+        tsh: l.tsh ?? null, vitamin_d_ng_ml: l.vitaminDNgMl ?? null,
+        additional_results: l.additionalResults ?? null,
+        report_pdf_url: l.reportPdfUrl ?? null, notes: l.notes ?? null, raw_json: l,
+      }).select("id").limit(1);
+      results.labs = data?.[0] || { error: error?.message };
+    }
+
+    return res.status(201).json({ ok: true, results });
+  } catch (err) {
+    console.error("Error in POST /clinician/intake:", err);
+    return res.status(500).json({ ok: false, error: "internal_error", detail: err.message });
+  }
+});
+
+// GET /clinician/patient/:userId/timeline — Full patient timeline
+app.get("/clinician/patient/:userId/timeline", async (req, res) => {
+  try {
+    const { userId } = req.params;
+    const { limit = 10 } = req.query;
+
+    const [sessions, plans, snapshots] = await Promise.all([
+      supabase.from("testing_sessions").select("*").eq("user_id", userId).order("session_date", { ascending: false }).limit(parseInt(limit)),
+      supabase.from("care_plans").select("*").eq("user_id", userId).order("created_at", { ascending: false }).limit(parseInt(limit)),
+      supabase.from("daily_snapshots").select("day_key,steps,resting_hr,hrv,sleep_total_minutes,vo2_max").eq("user_id", userId).order("snapshot_date", { ascending: false }).limit(90),
+    ]);
+
+    return res.json({
+      ok: true,
+      sessions: sessions.data || [],
+      plans: plans.data || [],
+      recent_snapshots: snapshots.data || [],
+    });
+  } catch (err) {
+    return res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
 // --- Debug: list all registered routes ---
 function listRoutes() {
   const out = [];
