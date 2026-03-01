@@ -10,9 +10,96 @@ const {
   buildResolvedBundle,
 } = require("./services/resolvedBundle/buildResolvedBundle");
 
+// --- Structured logging helper (defined early for middleware use) ---
+function structuredLog(event, data = {}) {
+  const entry = {
+    ts: new Date().toISOString(),
+    event,
+    ...data,
+  };
+  console.log(JSON.stringify(entry));
+}
+
 const app = express();
 app.set("trust proxy", 1);
-app.use(cors({ origin: "*", methods: ["GET", "POST", "OPTIONS"] }));
+
+// --- Security headers (replaces helmet.js) ---
+app.use((_req, res, next) => {
+  res.setHeader("X-Content-Type-Options", "nosniff");
+  res.setHeader("X-Frame-Options", "DENY");
+  res.setHeader("X-XSS-Protection", "0"); // modern browsers; CSP is preferred
+  res.setHeader("Strict-Transport-Security", "max-age=31536000; includeSubDomains");
+  res.setHeader("Referrer-Policy", "strict-origin-when-cross-origin");
+  res.setHeader("Permissions-Policy", "camera=(), microphone=(), geolocation=()");
+  res.removeHeader("X-Powered-By");
+  next();
+});
+
+// --- CORS: restrict to iOS app + local dev ---
+const ALLOWED_ORIGINS = [
+  "capacitor://com.vitaliage",        // iOS WKWebView (Capacitor-style)
+  "ionic://com.vitaliage",             // Ionic native
+  "http://localhost:3000",             // local dev
+  "http://localhost:8080",             // local dev alt
+];
+app.use(
+  cors({
+    origin(origin, cb) {
+      // Allow requests with no origin (mobile apps, curl, server-to-server)
+      if (!origin) return cb(null, true);
+      if (ALLOWED_ORIGINS.includes(origin)) return cb(null, true);
+      cb(new Error("CORS: origin not allowed"));
+    },
+    methods: ["GET", "POST", "OPTIONS"],
+    allowedHeaders: ["Content-Type", "Authorization", "X-Vitaliage-Key"],
+    maxAge: 86400, // preflight cache 24h
+  })
+);
+
+// --- In-memory rate limiter ---
+const RATE_WINDOW_MS = 60 * 1000; // 1 minute
+const RATE_MAX_REQUESTS = 60;     // 60 req/min per IP
+const rateBuckets = new Map();
+
+// Cleanup stale buckets every 5 minutes
+setInterval(() => {
+  const now = Date.now();
+  for (const [key, bucket] of rateBuckets) {
+    if (now - bucket.windowStart > RATE_WINDOW_MS * 2) rateBuckets.delete(key);
+  }
+}, 5 * 60 * 1000);
+
+app.use((req, res, next) => {
+  // Skip rate limiting for health checks
+  if (req.path === "/" || req.path === "/ping") return next();
+
+  const ip = req.ip || req.connection.remoteAddress;
+  const now = Date.now();
+  let bucket = rateBuckets.get(ip);
+
+  if (!bucket || now - bucket.windowStart > RATE_WINDOW_MS) {
+    bucket = { windowStart: now, count: 0 };
+    rateBuckets.set(ip, bucket);
+  }
+
+  bucket.count++;
+
+  // Set standard rate-limit headers
+  res.setHeader("X-RateLimit-Limit", RATE_MAX_REQUESTS);
+  res.setHeader("X-RateLimit-Remaining", Math.max(0, RATE_MAX_REQUESTS - bucket.count));
+  res.setHeader("X-RateLimit-Reset", Math.ceil((bucket.windowStart + RATE_WINDOW_MS) / 1000));
+
+  if (bucket.count > RATE_MAX_REQUESTS) {
+    structuredLog("rate_limited", { ip, path: req.path });
+    return res.status(429).json({
+      ok: false,
+      error: "too_many_requests",
+      message: "Rate limit exceeded. Try again shortly.",
+    });
+  }
+  next();
+});
+
 app.use(express.json({ limit: "1mb" }));
 
 // --- Shared helpers / regex ---
@@ -173,6 +260,46 @@ if (!supabaseKey) {
 
 const supabase = createClient(process.env.SUPABASE_URL, supabaseKey);
 
+// --- Request logging middleware ---
+app.use((req, res, next) => {
+  const start = Date.now();
+  res.on("finish", () => {
+    // Only log API routes (skip static files)
+    if (req.path.startsWith("/dashboard") || req.path.includes(".")) return;
+    structuredLog("http_request", {
+      method: req.method,
+      path: req.path,
+      status: res.statusCode,
+      duration_ms: Date.now() - start,
+      userId: getAppUserIdFromAny(req.method === "GET" ? req.query : req.body) || null,
+    });
+  });
+  next();
+});
+
+// --- API key authentication middleware ---
+// Set VITALIAGE_API_KEY in Render env vars. iOS sends it as X-Vitaliage-Key header.
+// Skip auth on health checks, static assets, and the dashboard.
+const API_KEY = process.env.VITALIAGE_API_KEY || null;
+
+function requireApiKey(req, res, next) {
+  // If no key is configured, allow all (dev mode)
+  if (!API_KEY) return next();
+
+  // Skip auth for health checks and static assets
+  const openPaths = ["/", "/ping", "/db-check", "/__routes"];
+  if (openPaths.includes(req.path)) return next();
+  if (req.path.startsWith("/dashboard") || req.path.startsWith("/docs")) return next();
+
+  const clientKey = req.headers["x-vitaliage-key"];
+  if (!clientKey || clientKey !== API_KEY) {
+    structuredLog("auth_rejected", { path: req.path, method: req.method });
+    return res.status(401).json({ ok: false, error: "unauthorized", message: "Invalid or missing API key" });
+  }
+  next();
+}
+app.use(requireApiKey);
+
 // --- Health routes ---
 app.get("/", (_req, res) => res.send("Vitaliage Push API ✅"));
 app.get("/ping", (_req, res) => res.json({ ok: true }));
@@ -214,20 +341,36 @@ app.get("/resolved-bundle", async (req, res) => {
       });
     }
 
+    const t0 = Date.now();
     const bundle = await buildResolvedBundle({
       supabase,
       userId, // IMPORTANT: this is the app UUID stored in daily_snapshots.user_id
       bundleDayKey: dayKey,
       windowDays,
     });
+    const buildMs = Date.now() - t0;
 
     const shape = validateBundleShape(bundle);
     if (!shape.ok) {
+      structuredLog("bundle_build_error", { userId, dayKey, windowDays, error: shape.error, build_ms: buildMs });
       return res.status(500).json({ ok: false, error: shape.error });
     }
 
+    structuredLog("bundle_build_ok", {
+      userId,
+      dayKey,
+      windowDays,
+      build_ms: buildMs,
+      bundle_hash: bundle.bundle_hash,
+      readiness_score: bundle.derived_metrics?.readiness?.score ?? null,
+      readiness_state: bundle.derived_metrics?.readiness?.state ?? null,
+      confidence_overall: bundle.confidence?.overall?.score ?? null,
+      snapshot_count: bundle.daily_snapshots?.length ?? 0,
+    });
+
     return res.json({ ok: true, bundle });
   } catch (err) {
+    structuredLog("bundle_build_exception", { userId: getAppUserIdFromAny(req.query), error: err.message });
     return res.status(500).json({
       ok: false,
       error: err.message || "Internal Server Error",
@@ -285,9 +428,12 @@ app.post("/snapshot", async (req, res) => {
     }
 
     // NOTE: Only include columns that exist in public.daily_snapshots
+    // day_key enables upsert deduplication (one snapshot per user per day)
+    const dk = dayKeyUtc(snapshotDate);
     const payload = {
       user_id: userId, // IMPORTANT: this is app UUID (current, pre-auth)
       snapshot_date: snapshotDate.toISOString(),
+      day_key: dk,
 
       steps: body.steps ?? null,
       resting_hr: body.restingHR ?? body.resting_hr ?? null,
@@ -349,14 +495,16 @@ app.post("/snapshot", async (req, res) => {
       });
     }
 
+    // Upsert: if a row for this (user_id, day_key) already exists, update it.
+    // REQUIRES: unique constraint on (user_id, day_key) in Supabase.
     const { data, error } = await supabase
       .from("daily_snapshots")
-      .insert(payload)
+      .upsert(payload, { onConflict: "user_id,day_key" })
       .select("*")
       .limit(1);
 
     if (error) {
-      console.error("Supabase insert error in /snapshot:", error);
+      structuredLog("snapshot_insert_error", { userId, error: error.message || error.code });
       return res.status(500).json({
         ok: false,
         error: "db_insert_failed",
@@ -364,9 +512,78 @@ app.post("/snapshot", async (req, res) => {
       });
     }
 
+    // Count how many non-null metrics were provided
+    const metricCount = [
+      payload.steps, payload.resting_hr, payload.hrv, payload.vo2_max,
+      payload.respiratory_rate, payload.glucose_mg_dl, payload.bp_systolic,
+      payload.sleep_total_minutes, payload.weight_kg, payload.body_fat_percent,
+    ].filter((v) => v != null).length;
+
+    structuredLog("snapshot_insert_ok", {
+      userId,
+      snapshot_date: payload.snapshot_date,
+      metric_count: metricCount,
+      id: data?.[0]?.id ?? null,
+    });
+
     return res.status(200).json({ ok: true, snapshot: data?.[0] || null });
   } catch (err) {
-    console.error("Error in POST /snapshot:", err);
+    structuredLog("snapshot_insert_exception", { error: err.message });
+    return res
+      .status(500)
+      .json({ ok: false, error: "internal_error", detail: err.message });
+  }
+});
+
+// =======================================================
+// WEARABLE DAILY SNAPSHOT FETCH
+// Endpoint: GET /daily-snapshots
+// Table: daily_snapshots
+//
+// REQUIRES userId (UUID) to prevent mixing.
+// Returns recent snapshots ordered by snapshot_date DESC.
+// =======================================================
+app.get("/daily-snapshots", async (req, res) => {
+  try {
+    const userId = getAppUserIdFromAny(req.query);
+    if (!userId) {
+      return res.status(400).json({
+        ok: false,
+        error: "missing_or_invalid_userId",
+        message:
+          "Provide a valid userId (UUID) as query param: ?userId=xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx",
+      });
+    }
+
+    const limit = Math.min(Math.max(parseInt(req.query.limit, 10) || 7, 1), 90);
+
+    let query = supabase
+      .from("daily_snapshots")
+      .select("*")
+      .eq("user_id", userId)
+      .order("snapshot_date", { ascending: false })
+      .limit(limit);
+
+    // Optional date range filters (ISO 8601 strings)
+    const fromIso = toIsoOrNull(req.query.from);
+    const toIso = toIsoOrNull(req.query.to);
+    if (fromIso) query = query.gte("snapshot_date", fromIso);
+    if (toIso) query = query.lte("snapshot_date", toIso);
+
+    const { data, error } = await query;
+
+    if (error) {
+      console.error("Supabase query error in GET /daily-snapshots:", error);
+      return res.status(500).json({
+        ok: false,
+        error: "db_query_failed",
+        detail: error.message || error.code,
+      });
+    }
+
+    return res.json({ ok: true, snapshots: data || [] });
+  } catch (err) {
+    console.error("Error in GET /daily-snapshots:", err);
     return res
       .status(500)
       .json({ ok: false, error: "internal_error", detail: err.message });
