@@ -10,6 +10,24 @@ const {
   buildResolvedBundle,
 } = require("./services/resolvedBundle/buildResolvedBundle");
 
+const {
+  updateStreak,
+  checkMilestoneAchievements,
+  getUserStreaks,
+} = require("./services/streaks/updateStreaks");
+
+const {
+  generateAndStoreInsights,
+  getActiveInsights,
+} = require("./services/insights/generateInsights");
+
+const {
+  PROVIDERS,
+  getProvider,
+  listProviders,
+  normalizeProviderData,
+} = require("./services/integrations/providers");
+
 // --- Structured logging helper (defined early for middleware use) ---
 function structuredLog(event, data = {}) {
   const entry = {
@@ -50,7 +68,7 @@ app.use(
       if (ALLOWED_ORIGINS.includes(origin)) return cb(null, true);
       cb(new Error("CORS: origin not allowed"));
     },
-    methods: ["GET", "POST", "OPTIONS"],
+    methods: ["GET", "POST", "DELETE", "OPTIONS"],
     allowedHeaders: ["Content-Type", "Authorization", "X-Vitaliage-Key"],
     maxAge: 86400, // preflight cache 24h
   })
@@ -1276,6 +1294,725 @@ app.post("/office/rmr", async (req, res) => {
     return res
       .status(500)
       .json({ ok: false, error: "internal_error", detail: err.message });
+  }
+});
+
+// =============================================================
+// MORNING CHECK-IN ENDPOINTS
+// =============================================================
+
+/**
+ * POST /check-in
+ * Submit (or update) a daily morning check-in.
+ */
+app.post("/check-in", async (req, res) => {
+  try {
+    const {
+      userId,
+      energy_level,
+      mood,
+      sleep_quality,
+      stress_level,
+      notes,
+    } = req.body;
+
+    if (!userId) {
+      return res.status(400).json({ ok: false, error: "userId is required" });
+    }
+
+    const dayKey = dayKeyUtc(new Date());
+
+    // Validate 1-5 range for all rating fields
+    const ratings = { energy_level, mood, sleep_quality, stress_level };
+    for (const [field, val] of Object.entries(ratings)) {
+      if (val !== undefined && val !== null) {
+        const n = Number(val);
+        if (!Number.isInteger(n) || n < 1 || n > 5) {
+          return res.status(400).json({
+            ok: false,
+            error: `${field} must be an integer between 1 and 5`,
+          });
+        }
+      }
+    }
+
+    const row = {
+      user_id: userId,
+      day_key: dayKey,
+      energy_level: energy_level ?? null,
+      mood: mood ?? null,
+      sleep_quality: sleep_quality ?? null,
+      stress_level: stress_level ?? null,
+      notes: notes ?? null,
+    };
+
+    const { data, error } = await supabase
+      .from("check_ins")
+      .upsert(row, { onConflict: "user_id,day_key" })
+      .select()
+      .single();
+
+    if (error) {
+      console.error("Error in POST /check-in:", error);
+      return res.status(500).json({ ok: false, error: error.message });
+    }
+
+    // Update check-in streak
+    await updateStreak(supabase, userId, "check_in", dayKey);
+
+    // Check milestone achievements (total check-in count)
+    const { count } = await supabase
+      .from("check_ins")
+      .select("id", { count: "exact", head: true })
+      .eq("user_id", userId);
+    if (count) {
+      await checkMilestoneAchievements(supabase, userId, count);
+    }
+
+    structuredLog("check_in_submitted", { userId, dayKey });
+    return res.status(200).json({ ok: true, checkIn: data });
+  } catch (err) {
+    console.error("Error in POST /check-in:", err);
+    return res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
+/**
+ * GET /check-ins?userId=...&from=YYYY-MM-DD&to=YYYY-MM-DD
+ * Fetch check-in history for a user.
+ */
+app.get("/check-ins", async (req, res) => {
+  try {
+    const { userId, from, to, limit } = req.query;
+    if (!userId) {
+      return res.status(400).json({ ok: false, error: "userId is required" });
+    }
+
+    let query = supabase
+      .from("check_ins")
+      .select("*")
+      .eq("user_id", userId)
+      .order("day_key", { ascending: false });
+
+    if (from) query = query.gte("day_key", from);
+    if (to) query = query.lte("day_key", to);
+    if (limit) query = query.limit(Number(limit));
+
+    const { data, error } = await query;
+
+    if (error) {
+      return res.status(500).json({ ok: false, error: error.message });
+    }
+    return res.status(200).json({ ok: true, checkIns: data || [] });
+  } catch (err) {
+    return res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
+// =============================================================
+// STREAKS & ACHIEVEMENTS ENDPOINTS
+// =============================================================
+
+/**
+ * GET /streaks?userId=...
+ * Get all streak records for a user.
+ */
+app.get("/streaks", async (req, res) => {
+  try {
+    const { userId } = req.query;
+    if (!userId) {
+      return res.status(400).json({ ok: false, error: "userId is required" });
+    }
+    const streaks = await getUserStreaks(supabase, userId);
+    return res.status(200).json({ ok: true, streaks });
+  } catch (err) {
+    return res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
+/**
+ * GET /achievements
+ * List all available achievement definitions.
+ */
+app.get("/achievements", async (_req, res) => {
+  try {
+    const { data, error } = await supabase
+      .from("achievements")
+      .select("*")
+      .order("category")
+      .order("threshold_value");
+
+    if (error) {
+      return res.status(500).json({ ok: false, error: error.message });
+    }
+    return res.status(200).json({ ok: true, achievements: data || [] });
+  } catch (err) {
+    return res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
+/**
+ * GET /user-achievements?userId=...
+ * Get earned achievements for a user.
+ */
+app.get("/user-achievements", async (req, res) => {
+  try {
+    const { userId } = req.query;
+    if (!userId) {
+      return res.status(400).json({ ok: false, error: "userId is required" });
+    }
+
+    const { data, error } = await supabase
+      .from("user_achievements")
+      .select("*, achievements(*)")
+      .eq("user_id", userId)
+      .order("earned_at", { ascending: false });
+
+    if (error) {
+      return res.status(500).json({ ok: false, error: error.message });
+    }
+    return res.status(200).json({ ok: true, userAchievements: data || [] });
+  } catch (err) {
+    return res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
+// =============================================================
+// WEEKLY CHALLENGES ENDPOINTS
+// =============================================================
+
+/**
+ * GET /challenges
+ * List active challenges.
+ */
+app.get("/challenges", async (_req, res) => {
+  try {
+    const { data, error } = await supabase
+      .from("challenges")
+      .select("*")
+      .eq("active", true)
+      .order("start_date", { ascending: false });
+
+    if (error) {
+      return res.status(500).json({ ok: false, error: error.message });
+    }
+    return res.status(200).json({ ok: true, challenges: data || [] });
+  } catch (err) {
+    return res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
+/**
+ * POST /challenges/join
+ * Join a challenge.
+ */
+app.post("/challenges/join", async (req, res) => {
+  try {
+    const { userId, challengeId } = req.body;
+    if (!userId || !challengeId) {
+      return res.status(400).json({
+        ok: false,
+        error: "userId and challengeId are required",
+      });
+    }
+
+    const { data, error } = await supabase
+      .from("user_challenges")
+      .upsert(
+        {
+          user_id: userId,
+          challenge_id: challengeId,
+          joined_at: new Date().toISOString(),
+          current_progress: 0,
+          completed: false,
+        },
+        { onConflict: "user_id,challenge_id" }
+      )
+      .select("*, challenges(*)")
+      .single();
+
+    if (error) {
+      return res.status(500).json({ ok: false, error: error.message });
+    }
+
+    structuredLog("challenge_joined", { userId, challengeId });
+    return res.status(200).json({ ok: true, userChallenge: data });
+  } catch (err) {
+    return res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
+/**
+ * GET /user-challenges?userId=...&completed=false
+ * Get user's active/completed challenges.
+ */
+app.get("/user-challenges", async (req, res) => {
+  try {
+    const { userId, completed } = req.query;
+    if (!userId) {
+      return res.status(400).json({ ok: false, error: "userId is required" });
+    }
+
+    let query = supabase
+      .from("user_challenges")
+      .select("*, challenges(*)")
+      .eq("user_id", userId)
+      .order("joined_at", { ascending: false });
+
+    if (completed !== undefined) {
+      query = query.eq("completed", completed === "true");
+    }
+
+    const { data, error } = await query;
+
+    if (error) {
+      return res.status(500).json({ ok: false, error: error.message });
+    }
+    return res.status(200).json({ ok: true, userChallenges: data || [] });
+  } catch (err) {
+    return res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
+// =============================================================
+// PERSONALIZED INSIGHTS ENDPOINTS
+// =============================================================
+
+/**
+ * GET /insights?userId=...&limit=20
+ * Get active (undismissed) insights for a user.
+ */
+app.get("/insights", async (req, res) => {
+  try {
+    const { userId, limit } = req.query;
+    if (!userId) {
+      return res.status(400).json({ ok: false, error: "userId is required" });
+    }
+
+    const insights = await getActiveInsights(
+      supabase,
+      userId,
+      limit ? Number(limit) : 20
+    );
+    return res.status(200).json({ ok: true, insights });
+  } catch (err) {
+    return res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
+/**
+ * POST /insights/:id/dismiss
+ * Dismiss an insight.
+ */
+app.post("/insights/:id/dismiss", async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { userId } = req.body;
+
+    if (!userId) {
+      return res.status(400).json({ ok: false, error: "userId is required" });
+    }
+
+    const { data, error } = await supabase
+      .from("insights")
+      .update({ dismissed: true })
+      .eq("id", id)
+      .eq("user_id", userId)
+      .select()
+      .single();
+
+    if (error) {
+      return res.status(500).json({ ok: false, error: error.message });
+    }
+    return res.status(200).json({ ok: true, insight: data });
+  } catch (err) {
+    return res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
+/**
+ * POST /insights/generate
+ * Trigger insight generation from the latest resolved bundle.
+ */
+app.post("/insights/generate", async (req, res) => {
+  try {
+    const { userId } = req.body;
+    if (!userId) {
+      return res.status(400).json({ ok: false, error: "userId is required" });
+    }
+
+    // Build the resolved bundle to get latest trends
+    const bundle = await buildResolvedBundle(supabase, userId);
+    if (!bundle) {
+      return res.status(200).json({ ok: true, insights: [], message: "No data available for insight generation" });
+    }
+
+    const insights = await generateAndStoreInsights(supabase, userId, bundle);
+    structuredLog("insights_generated", { userId, count: insights.length });
+    return res.status(200).json({ ok: true, insights });
+  } catch (err) {
+    console.error("Error in POST /insights/generate:", err);
+    return res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
+// =============================================================
+// WEARABLE INTEGRATION ENDPOINTS
+// =============================================================
+
+/**
+ * GET /integrations/status?userId=...
+ * Check which providers are connected for a user.
+ */
+app.get("/integrations/status", async (req, res) => {
+  try {
+    const { userId } = req.query;
+    if (!userId) {
+      return res.status(400).json({ ok: false, error: "userId is required" });
+    }
+
+    const { data, error } = await supabase
+      .from("integration_tokens")
+      .select("provider, active, created_at, updated_at")
+      .eq("user_id", userId);
+
+    if (error) {
+      return res.status(500).json({ ok: false, error: error.message });
+    }
+
+    const providers = listProviders();
+    const connected = new Map((data || []).map((t) => [t.provider, t]));
+
+    const status = providers.map((p) => ({
+      ...p,
+      connected: connected.has(p.key) && connected.get(p.key).active,
+      connectedAt: connected.get(p.key)?.created_at || null,
+    }));
+
+    return res.status(200).json({ ok: true, integrations: status });
+  } catch (err) {
+    return res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
+/**
+ * GET /integrations/:provider/auth?userId=...
+ * Start OAuth flow — returns redirect URL for the provider.
+ */
+app.get("/integrations/:provider/auth", async (req, res) => {
+  try {
+    const { provider } = req.params;
+    const { userId } = req.query;
+
+    if (!userId) {
+      return res.status(400).json({ ok: false, error: "userId is required" });
+    }
+
+    const config = getProvider(provider);
+    if (!config) {
+      return res.status(400).json({ ok: false, error: `Unknown provider: ${provider}` });
+    }
+
+    const baseUrl = process.env.BASE_URL || `http://localhost:${process.env.PORT || 3001}`;
+    const callbackUrl = `${baseUrl}/integrations/${provider}/callback`;
+
+    if (config.authType === "oauth2") {
+      // OAuth 2.0 flow (Oura, WHOOP)
+      const clientId = process.env[`${provider.toUpperCase()}_CLIENT_ID`];
+      if (!clientId) {
+        return res.status(500).json({ ok: false, error: `${provider} client ID not configured` });
+      }
+
+      const params = new URLSearchParams({
+        client_id: clientId,
+        response_type: "code",
+        redirect_uri: callbackUrl,
+        scope: config.scopes,
+        state: Buffer.from(JSON.stringify({ userId, provider })).toString("base64"),
+      });
+
+      const authUrl = `${config.authUrl}?${params.toString()}`;
+      structuredLog("oauth_start", { provider, userId });
+      return res.status(200).json({ ok: true, authUrl });
+    } else if (config.authType === "oauth1a") {
+      // OAuth 1.0a flow (Garmin) — simplified; full impl needs request token step
+      // For now, return the auth URL info so the client can handle it
+      structuredLog("oauth_start", { provider, userId, note: "oauth1a requires request token step" });
+      return res.status(200).json({
+        ok: true,
+        authUrl: config.authUrl,
+        note: "Garmin OAuth 1.0a requires a request token step. Full implementation pending developer account setup.",
+      });
+    }
+
+    return res.status(400).json({ ok: false, error: "Unsupported auth type" });
+  } catch (err) {
+    console.error(`Error in GET /integrations/${req.params.provider}/auth:`, err);
+    return res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
+/**
+ * GET /integrations/:provider/callback
+ * OAuth callback — exchanges code for tokens and stores them.
+ */
+app.get("/integrations/:provider/callback", async (req, res) => {
+  try {
+    const { provider } = req.params;
+    const { code, state } = req.query;
+
+    const config = getProvider(provider);
+    if (!config) {
+      return res.status(400).send("Unknown provider");
+    }
+
+    // Decode state to get userId
+    let stateData;
+    try {
+      stateData = JSON.parse(Buffer.from(state, "base64").toString());
+    } catch {
+      return res.status(400).send("Invalid state parameter");
+    }
+
+    const { userId } = stateData;
+    if (!userId) {
+      return res.status(400).send("Missing userId in state");
+    }
+
+    if (config.authType === "oauth2") {
+      const clientId = process.env[`${provider.toUpperCase()}_CLIENT_ID`];
+      const clientSecret = process.env[`${provider.toUpperCase()}_CLIENT_SECRET`];
+      const baseUrl = process.env.BASE_URL || `http://localhost:${process.env.PORT || 3001}`;
+      const callbackUrl = `${baseUrl}/integrations/${provider}/callback`;
+
+      // Exchange code for tokens
+      const tokenRes = await fetch(config.tokenUrl, {
+        method: "POST",
+        headers: { "Content-Type": "application/x-www-form-urlencoded" },
+        body: new URLSearchParams({
+          grant_type: "authorization_code",
+          code,
+          client_id: clientId,
+          client_secret: clientSecret,
+          redirect_uri: callbackUrl,
+        }),
+      });
+
+      if (!tokenRes.ok) {
+        const errText = await tokenRes.text();
+        console.error(`[integrations] Token exchange failed for ${provider}:`, errText);
+        return res.status(500).send("Token exchange failed");
+      }
+
+      const tokens = await tokenRes.json();
+
+      // Store tokens
+      await supabase.from("integration_tokens").upsert(
+        {
+          user_id: userId,
+          provider,
+          access_token: tokens.access_token,
+          refresh_token: tokens.refresh_token || null,
+          token_expires_at: tokens.expires_in
+            ? new Date(Date.now() + tokens.expires_in * 1000).toISOString()
+            : null,
+          scopes: config.scopes,
+          active: true,
+          updated_at: new Date().toISOString(),
+        },
+        { onConflict: "user_id,provider" }
+      );
+
+      structuredLog("oauth_complete", { provider, userId });
+      // Redirect to a success page or deep link back to the app
+      return res.send(
+        `<html><body><h2>Connected to ${config.name}!</h2><p>You can close this window and return to the app.</p></body></html>`
+      );
+    }
+
+    return res.status(400).send("Unsupported auth type for callback");
+  } catch (err) {
+    console.error(`Error in /integrations/${req.params.provider}/callback:`, err);
+    return res.status(500).send("OAuth callback error");
+  }
+});
+
+/**
+ * POST /integrations/:provider/webhook
+ * Receive push data from wearable providers and normalize into daily_snapshots.
+ */
+app.post("/integrations/:provider/webhook", async (req, res) => {
+  try {
+    const { provider } = req.params;
+    const config = getProvider(provider);
+    if (!config) {
+      return res.status(400).json({ ok: false, error: "Unknown provider" });
+    }
+
+    const payload = req.body;
+    structuredLog("webhook_received", { provider, keys: Object.keys(payload) });
+
+    // For each data type in the payload, normalize and merge into daily_snapshots
+    const dataTypes = ["daily", "sleep", "recovery", "readiness"];
+    const results = [];
+
+    for (const dataType of dataTypes) {
+      const normalized = normalizeProviderData(provider, dataType, payload);
+      if (Object.keys(normalized).length === 0) continue;
+
+      // Look up the user by provider webhook data (provider_user_id)
+      // The actual user mapping depends on the provider's webhook format
+      // For now, if userId is in the payload or headers, use it
+      const userId = payload.userId || payload.user_id || req.headers["x-user-id"];
+      if (!userId) continue;
+
+      const dayKey = dayKeyUtc(new Date());
+      const { error } = await supabase.from("daily_snapshots").upsert(
+        {
+          user_id: userId,
+          day_key: dayKey,
+          ...normalized,
+          source: provider,
+          updated_at: new Date().toISOString(),
+        },
+        { onConflict: "user_id,day_key" }
+      );
+
+      if (error) {
+        console.error(`[webhook] Error upserting ${provider}/${dataType}:`, error.message);
+      } else {
+        results.push({ dataType, fields: Object.keys(normalized) });
+      }
+    }
+
+    return res.status(200).json({ ok: true, processed: results });
+  } catch (err) {
+    console.error(`Error in POST /integrations/${req.params.provider}/webhook:`, err);
+    return res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
+/**
+ * DELETE /integrations/:provider
+ * Disconnect a wearable provider.
+ */
+app.delete("/integrations/:provider", async (req, res) => {
+  try {
+    const { provider } = req.params;
+    const { userId } = req.body;
+
+    if (!userId) {
+      return res.status(400).json({ ok: false, error: "userId is required" });
+    }
+
+    const { error } = await supabase
+      .from("integration_tokens")
+      .update({ active: false, updated_at: new Date().toISOString() })
+      .eq("user_id", userId)
+      .eq("provider", provider);
+
+    if (error) {
+      return res.status(500).json({ ok: false, error: error.message });
+    }
+
+    structuredLog("integration_disconnected", { provider, userId });
+    return res.status(200).json({ ok: true, message: `${provider} disconnected` });
+  } catch (err) {
+    return res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
+// =============================================================
+// CLINICIAN DASHBOARD ENDPOINTS
+// =============================================================
+
+/**
+ * GET /clinician/patients?clinicianId=...
+ * List patients with summary health status.
+ */
+app.get("/clinician/patients", async (req, res) => {
+  try {
+    const { clinicianId } = req.query;
+    // For now, list all users who have snapshots (clinician-patient mapping can be added later)
+    const { data: snapshots, error } = await supabase
+      .from("daily_snapshots")
+      .select("user_id, day_key, steps, sleep_total_minutes, resting_hr, hrv")
+      .order("day_key", { ascending: false });
+
+    if (error) {
+      return res.status(500).json({ ok: false, error: error.message });
+    }
+
+    // Group by user, take latest snapshot per user
+    const userMap = new Map();
+    for (const s of snapshots || []) {
+      if (!userMap.has(s.user_id)) {
+        userMap.set(s.user_id, {
+          userId: s.user_id,
+          lastActivity: s.day_key,
+          latestSnapshot: s,
+        });
+      }
+    }
+
+    const patients = Array.from(userMap.values());
+    return res.status(200).json({ ok: true, patients });
+  } catch (err) {
+    return res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
+/**
+ * GET /clinician/patient/:userId/digest
+ * Weekly digest for a specific patient.
+ */
+app.get("/clinician/patient/:userId/digest", async (req, res) => {
+  try {
+    const { userId } = req.params;
+    const { windowDays } = req.query;
+    const days = windowDays ? Number(windowDays) : 7;
+
+    // Build resolved bundle for the patient
+    const bundle = await buildResolvedBundle(supabase, userId, { windowDays: days });
+
+    if (!bundle) {
+      return res.status(200).json({
+        ok: true,
+        digest: null,
+        message: "No data available for this patient",
+      });
+    }
+
+    // Generate insights for this digest
+    const insights = await generateAndStoreInsights(supabase, userId, bundle);
+
+    // Get recent check-ins
+    const fromDate = new Date();
+    fromDate.setDate(fromDate.getDate() - days);
+    const { data: checkIns } = await supabase
+      .from("check_ins")
+      .select("*")
+      .eq("user_id", userId)
+      .gte("day_key", dayKeyUtc(fromDate))
+      .order("day_key", { ascending: false });
+
+    // Get streaks
+    const streaks = await getUserStreaks(supabase, userId);
+
+    const digest = {
+      userId,
+      windowDays: days,
+      generatedAt: new Date().toISOString(),
+      resolvedBundle: bundle,
+      insights,
+      checkIns: checkIns || [],
+      streaks,
+    };
+
+    return res.status(200).json({ ok: true, digest });
+  } catch (err) {
+    console.error(`Error in GET /clinician/patient/${req.params.userId}/digest:`, err);
+    return res.status(500).json({ ok: false, error: err.message });
   }
 });
 
