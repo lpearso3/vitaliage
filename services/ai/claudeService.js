@@ -330,10 +330,88 @@ async function generateMetricExplanation(bundle, metric) {
   return data.content?.[0]?.text || "Unable to generate explanation at this time.";
 }
 
+// ── Readiness Plan ─────────────────────────────────────────────
+
+const SYSTEM_PROMPT_READINESS = `You are a health and wellness coach for Metamorphosis Wellness, a regenerative medicine clinic.
+
+You are creating a personalized daily plan based on a patient's readiness score and health data.
+
+Structure your response in exactly these sections using the headers shown:
+
+**Today's Exercise**
+Based on their readiness, suggest specific exercise type, intensity, and duration. Be concrete (e.g. "30-minute brisk walk" not "light exercise").
+
+**Recovery & Rest**
+Suggest specific recovery activities for today (stretching, foam rolling, breathing exercises, etc.). Tailor intensity to their readiness.
+
+**Sleep Tonight**
+Give 2-3 specific tips to optimize tonight's sleep based on their recent sleep patterns.
+
+**Nutrition Focus**
+Suggest 1-2 nutrition priorities for today based on their activity level and recovery needs.
+
+Guidelines:
+- Be warm, encouraging, and specific — no generic advice
+- Tailor everything to their readiness score and the reasons provided
+- For "ready" scores: suggest challenging but smart training
+- For "easy" scores: suggest steady, moderate activity
+- For "rest" scores: prioritize recovery with gentle movement only
+- Never diagnose or prescribe — suggest they talk to their care team for medical concerns
+- Keep total response under 300 words
+- Use "you" / "your" — speak directly to the patient`;
+
+/**
+ * Generate a personalized daily plan based on readiness.
+ * @param {Object} bundle - Resolved bundle
+ * @param {number} score - Readiness score 0-100
+ * @param {string} band - Readiness band (ready/easy/rest)
+ * @param {string[]} reasons - Readiness reasons
+ * @returns {Promise<string>} Plan text
+ */
+async function generateReadinessPlan(bundle, score, band, reasons) {
+  const apiKey = getApiKey();
+  const context = bundleToContext(bundle);
+
+  const reasonsText = reasons && reasons.length > 0
+    ? `\nReadiness factors:\n${reasons.map(r => `- ${r}`).join("\n")}`
+    : "";
+
+  const body = {
+    model: MODEL,
+    max_tokens: 600,
+    system: SYSTEM_PROMPT_READINESS,
+    messages: [
+      {
+        role: "user",
+        content: `Here is my health data:\n\n${context}\n\nMy readiness score is ${score ?? "unknown"}/100 (state: ${band || "unknown"}).${reasonsText}\n\nPlease create my personalized plan for today.`,
+      },
+    ],
+  };
+
+  const response = await fetch(ANTHROPIC_API_URL, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "x-api-key": apiKey,
+      "anthropic-version": ANTHROPIC_VERSION,
+    },
+    body: JSON.stringify(body),
+  });
+
+  if (!response.ok) {
+    const errText = await response.text();
+    throw new Error(`Anthropic API error [${response.status}]: ${errText}`);
+  }
+
+  const data = await response.json();
+  return data.content?.[0]?.text || "Unable to generate plan at this time.";
+}
+
 module.exports = {
   generateDailySummary,
   streamChatResponse,
   generateMetricExplanation,
+  generateReadinessPlan,
   bundleToContext,
   MODEL,
 };

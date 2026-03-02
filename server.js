@@ -25,6 +25,7 @@ const {
   generateDailySummary,
   streamChatResponse,
   generateMetricExplanation,
+  generateReadinessPlan,
 } = require("./services/ai/claudeService");
 
 const {
@@ -1913,6 +1914,51 @@ app.post("/ai/metric-explain", async (req, res) => {
     return res.json({ ok: true, explanation, cached: false });
   } catch (err) {
     console.error("Error in POST /ai/metric-explain:", err);
+    return res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
+/**
+ * POST /ai/readiness-plan
+ * Generate an AI-powered personalized daily plan based on readiness.
+ * Body: { userId, score?, band?, reasons? }
+ */
+app.post("/ai/readiness-plan", async (req, res) => {
+  try {
+    const { userId, score, band, reasons } = req.body;
+    if (!userId) {
+      return res.status(400).json({ ok: false, error: "userId required" });
+    }
+
+    const todayKey = new Date().toISOString().slice(0, 10);
+
+    // Check cache
+    const cacheKey = `readiness_plan_${todayKey}`;
+    const { data: cached } = await supabase
+      .from("ai_summaries")
+      .select("summary_text")
+      .eq("user_id", userId)
+      .eq("day_key", cacheKey)
+      .maybeSingle();
+
+    if (cached?.summary_text) {
+      return res.json({ ok: true, plan: cached.summary_text, cached: true });
+    }
+
+    // Build bundle and generate
+    const bundle = await buildResolvedBundle({ supabase, userId, bundleDayKey: todayKey, windowDays: 28 });
+    const plan = await generateReadinessPlan(bundle, score, band, reasons || []);
+
+    // Cache it
+    await supabase.from("ai_summaries").upsert(
+      { user_id: userId, day_key: cacheKey, summary_text: plan, model: "claude-sonnet-4-5" },
+      { onConflict: "user_id,day_key" }
+    );
+
+    structuredLog("ai_readiness_plan", { userId, score, band, responseLength: plan.length });
+    return res.json({ ok: true, plan, cached: false });
+  } catch (err) {
+    console.error("Error in POST /ai/readiness-plan:", err);
     return res.status(500).json({ ok: false, error: err.message });
   }
 });
