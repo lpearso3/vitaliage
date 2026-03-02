@@ -1883,7 +1883,7 @@ app.post("/ai/metric-explain", async (req, res) => {
       return res.status(400).json({ ok: false, error: "userId and metric required" });
     }
 
-    const validMetrics = ["steps", "sleep", "heart_rate", "hrv", "readiness"];
+    const validMetrics = ["steps", "sleep", "heart_rate", "hrv", "readiness", "activity_load", "vo2_max", "glucose"];
     if (!validMetrics.includes(metric)) {
       return res.status(400).json({ ok: false, error: `Invalid metric. Must be one of: ${validMetrics.join(", ")}` });
     }
