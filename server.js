@@ -24,6 +24,7 @@ const {
 const {
   generateDailySummary,
   streamChatResponse,
+  generateMetricExplanation,
 } = require("./services/ai/claudeService");
 
 const {
@@ -1862,6 +1863,57 @@ app.post("/ai/chat", async (req, res) => {
     } else {
       return res.status(500).json({ ok: false, error: err.message });
     }
+  }
+});
+
+/**
+ * POST /ai/metric-explain
+ * Generate an AI-powered explanation of a specific health metric.
+ * Body: { userId, metric }
+ * metric: "steps" | "sleep" | "heart_rate" | "hrv" | "readiness"
+ */
+app.post("/ai/metric-explain", async (req, res) => {
+  try {
+    const { userId, metric } = req.body;
+    if (!userId || !metric) {
+      return res.status(400).json({ ok: false, error: "userId and metric required" });
+    }
+
+    const validMetrics = ["steps", "sleep", "heart_rate", "hrv", "readiness"];
+    if (!validMetrics.includes(metric)) {
+      return res.status(400).json({ ok: false, error: `Invalid metric. Must be one of: ${validMetrics.join(", ")}` });
+    }
+
+    const todayKey = new Date().toISOString().slice(0, 10);
+
+    // Check cache (keyed by user + metric + day)
+    const cacheKey = `${metric}_${todayKey}`;
+    const { data: cached } = await supabase
+      .from("ai_summaries")
+      .select("summary_text")
+      .eq("user_id", userId)
+      .eq("day_key", cacheKey)
+      .maybeSingle();
+
+    if (cached?.summary_text) {
+      return res.json({ ok: true, explanation: cached.summary_text, cached: true });
+    }
+
+    // Build bundle and generate
+    const bundle = await buildResolvedBundle({ supabase, userId, bundleDayKey: todayKey, windowDays: 28 });
+    const explanation = await generateMetricExplanation(bundle, metric);
+
+    // Cache it
+    await supabase.from("ai_summaries").upsert(
+      { user_id: userId, day_key: cacheKey, summary_text: explanation, model: "claude-sonnet-4-5" },
+      { onConflict: "user_id,day_key" }
+    );
+
+    structuredLog("ai_metric_explain", { userId, metric, responseLength: explanation.length });
+    return res.json({ ok: true, explanation, cached: false });
+  } catch (err) {
+    console.error("Error in POST /ai/metric-explain:", err);
+    return res.status(500).json({ ok: false, error: err.message });
   }
 });
 

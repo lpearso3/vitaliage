@@ -254,9 +254,86 @@ async function streamChatResponse(bundle, messages, onChunk) {
   return fullText;
 }
 
+// ── Metric Explanation ──────────────────────────────────────────
+
+const SYSTEM_PROMPT_METRIC = `You are a health and wellness coach for Metamorphosis Wellness, a regenerative medicine clinic.
+
+You are providing a personalized explanation of a specific health metric for a patient. You have access to their 28-day health data.
+
+Structure your response in exactly these three sections using the headers shown:
+
+**Current Status**
+Explain where they are right now with this metric — their latest value, how it compares to healthy ranges, and any notable patterns.
+
+**Your Trend**
+Describe how this metric has changed over the past 28 days — improving, declining, or stable. Reference their actual numbers.
+
+**Your Goal**
+Suggest a personalized, achievable goal for this metric and give 2-3 specific, actionable tips to help them reach it.
+
+Guidelines:
+- Be warm, encouraging, and specific to their actual numbers
+- Never diagnose conditions or prescribe medications
+- For concerning values, suggest discussing with their care team
+- Use plain language, not medical jargon
+- Keep total response under 250 words
+- Address the patient directly using "you" / "your"`;
+
+/**
+ * Generate an AI explanation of a specific health metric.
+ * @param {Object} bundle - Resolved bundle
+ * @param {string} metric - Metric name (steps, sleep, heart_rate, hrv, readiness)
+ * @returns {Promise<string>} Explanation text
+ */
+async function generateMetricExplanation(bundle, metric) {
+  const apiKey = getApiKey();
+  const context = bundleToContext(bundle);
+
+  const metricLabels = {
+    steps: "Daily Steps",
+    sleep: "Sleep Duration & Quality",
+    heart_rate: "Resting Heart Rate",
+    hrv: "Heart Rate Variability (HRV)",
+    readiness: "Readiness Score",
+  };
+
+  const label = metricLabels[metric] || metric;
+
+  const body = {
+    model: MODEL,
+    max_tokens: 500,
+    system: SYSTEM_PROMPT_METRIC,
+    messages: [
+      {
+        role: "user",
+        content: `Here is my health data:\n\n${context}\n\nPlease explain my **${label}** metric — where I am now, how I'm trending, and what goal I should aim for.`,
+      },
+    ],
+  };
+
+  const response = await fetch(ANTHROPIC_API_URL, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "x-api-key": apiKey,
+      "anthropic-version": ANTHROPIC_VERSION,
+    },
+    body: JSON.stringify(body),
+  });
+
+  if (!response.ok) {
+    const errText = await response.text();
+    throw new Error(`Anthropic API error [${response.status}]: ${errText}`);
+  }
+
+  const data = await response.json();
+  return data.content?.[0]?.text || "Unable to generate explanation at this time.";
+}
+
 module.exports = {
   generateDailySummary,
   streamChatResponse,
+  generateMetricExplanation,
   bundleToContext,
   MODEL,
 };
