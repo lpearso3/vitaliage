@@ -22,6 +22,11 @@ const {
 } = require("./services/insights/generateInsights");
 
 const {
+  generateDailySummary,
+  streamChatResponse,
+} = require("./services/ai/claudeService");
+
+const {
   PROVIDERS,
   getProvider,
   listProviders,
@@ -1679,7 +1684,14 @@ app.post("/insights/generate", async (req, res) => {
     }
 
     // Build the resolved bundle to get latest trends
-    const bundle = await buildResolvedBundle(supabase, userId);
+    // bundleDayKey = today in UTC (YYYY-MM-DD)
+    const todayKey = new Date().toISOString().slice(0, 10);
+    const bundle = await buildResolvedBundle({
+      supabase,
+      userId,
+      bundleDayKey: todayKey,
+      windowDays: 28,
+    });
     if (!bundle) {
       return res.status(200).json({ ok: true, insights: [], message: "No data available for insight generation" });
     }
@@ -1690,6 +1702,166 @@ app.post("/insights/generate", async (req, res) => {
   } catch (err) {
     console.error("Error in POST /insights/generate:", err);
     return res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
+// =============================================================
+// AI ENDPOINTS (Claude-powered)
+// =============================================================
+
+/**
+ * POST /ai/summary
+ * Generate (or return cached) daily AI health summary.
+ * Body: { userId }
+ * Returns: { ok, summary: { text, dayKey, generatedAt } }
+ */
+app.post("/ai/summary", async (req, res) => {
+  try {
+    const userId = getAppUserIdFromAny(req.body);
+    if (!userId) {
+      return res.status(400).json({ ok: false, error: "userId is required" });
+    }
+
+    const dayKey = new Date().toISOString().slice(0, 10);
+
+    // Check cache first
+    const { data: cached } = await supabase
+      .from("ai_summaries")
+      .select("summary_text, created_at")
+      .eq("user_id", userId)
+      .eq("day_key", dayKey)
+      .limit(1)
+      .maybeSingle();
+
+    if (cached?.summary_text) {
+      structuredLog("ai_summary_cache_hit", { userId, dayKey });
+      return res.status(200).json({
+        ok: true,
+        summary: {
+          text: cached.summary_text,
+          dayKey,
+          generatedAt: cached.created_at,
+          cached: true,
+        },
+      });
+    }
+
+    // Build resolved bundle for context
+    const bundle = await buildResolvedBundle({
+      supabase,
+      userId,
+      bundleDayKey: dayKey,
+      windowDays: 28,
+    });
+
+    if (!bundle) {
+      return res.status(200).json({
+        ok: true,
+        summary: {
+          text: "Not enough data yet to generate a summary. Keep wearing your device and we'll have insights for you soon!",
+          dayKey,
+          generatedAt: new Date().toISOString(),
+          cached: false,
+        },
+      });
+    }
+
+    // Call Claude
+    const summaryText = await generateDailySummary(bundle);
+
+    // Cache in Supabase (upsert)
+    await supabase.from("ai_summaries").upsert(
+      {
+        user_id: userId,
+        day_key: dayKey,
+        summary_text: summaryText,
+        model: "claude-sonnet-4-5-20250929",
+      },
+      { onConflict: "user_id,day_key" }
+    );
+
+    structuredLog("ai_summary_generated", { userId, dayKey, length: summaryText.length });
+
+    return res.status(200).json({
+      ok: true,
+      summary: {
+        text: summaryText,
+        dayKey,
+        generatedAt: new Date().toISOString(),
+        cached: false,
+      },
+    });
+  } catch (err) {
+    console.error("Error in POST /ai/summary:", err);
+    return res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
+/**
+ * POST /ai/chat
+ * Streamed AI health coach chat via Server-Sent Events.
+ * Body: { userId, messages: [{ role: "user"|"assistant", content: "..." }] }
+ * Returns: SSE stream with text chunks, then [DONE].
+ */
+app.post("/ai/chat", async (req, res) => {
+  try {
+    const userId = getAppUserIdFromAny(req.body);
+    const { messages } = req.body;
+
+    if (!userId) {
+      return res.status(400).json({ ok: false, error: "userId is required" });
+    }
+    if (!Array.isArray(messages) || messages.length === 0) {
+      return res.status(400).json({ ok: false, error: "messages array is required" });
+    }
+
+    // Set up SSE headers
+    res.setHeader("Content-Type", "text/event-stream");
+    res.setHeader("Cache-Control", "no-cache");
+    res.setHeader("Connection", "keep-alive");
+    res.setHeader("X-Accel-Buffering", "no"); // Disable nginx buffering
+    res.flushHeaders();
+
+    // Build resolved bundle for context
+    const dayKey = new Date().toISOString().slice(0, 10);
+    let bundle = null;
+    try {
+      bundle = await buildResolvedBundle({
+        supabase,
+        userId,
+        bundleDayKey: dayKey,
+        windowDays: 28,
+      });
+    } catch (bundleErr) {
+      console.error("Warning: Could not build bundle for chat:", bundleErr.message);
+      // Continue without bundle — Claude can still chat
+    }
+
+    // Stream response
+    let fullResponse = "";
+    await streamChatResponse(bundle, messages, (chunk) => {
+      fullResponse += chunk;
+      res.write(`data: ${JSON.stringify({ text: chunk })}\n\n`);
+    });
+
+    // Send done signal
+    res.write(`data: ${JSON.stringify({ done: true, fullText: fullResponse })}\n\n`);
+    res.end();
+
+    structuredLog("ai_chat_response", {
+      userId,
+      messageCount: messages.length,
+      responseLength: fullResponse.length,
+    });
+  } catch (err) {
+    console.error("Error in POST /ai/chat:", err);
+    // If headers already sent, close the stream with error
+    if (res.headersSent) {
+      res.write(`data: ${JSON.stringify({ error: err.message })}\n\n`);
+      res.end();
+    } else {
+      return res.status(500).json({ ok: false, error: err.message });
+    }
   }
 });
 
@@ -2010,7 +2182,13 @@ app.get("/clinician/patient/:userId/digest", async (req, res) => {
     const days = windowDays ? Number(windowDays) : 7;
 
     // Build resolved bundle for the patient
-    const bundle = await buildResolvedBundle(supabase, userId, { windowDays: days });
+    const todayKey = new Date().toISOString().slice(0, 10);
+    const bundle = await buildResolvedBundle({
+      supabase,
+      userId,
+      bundleDayKey: todayKey,
+      windowDays: days,
+    });
 
     if (!bundle) {
       return res.status(200).json({
