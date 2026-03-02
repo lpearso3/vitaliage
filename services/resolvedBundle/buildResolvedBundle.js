@@ -10,6 +10,9 @@ const { buildFlags } = require("./flags/buildFlags");
 const {
   computeReadinessFromSnapshots,
 } = require("./readiness/computeReadinessFromSnapshots");
+const {
+  computeActivityLoadFromSnapshots,
+} = require("./activityLoad/computeActivityLoad");
 
 /**
  * Deterministic JSON stringify with stable key ordering.
@@ -230,6 +233,7 @@ async function buildResolvedBundle({
 
   // Derived metrics (wearable-only; excluded from bundle_hash)
   const readiness = computeReadinessFromSnapshots(snapshots);
+  const activity_load = computeActivityLoadFromSnapshots(snapshots);
 
   // Anchors (v1 baseline) — excluded from Step 2 trend calc and excluded from hash
   const [conneqt, tanita, grip, rmr] = await Promise.all([
@@ -344,6 +348,7 @@ async function buildResolvedBundle({
     // Canonical derived metrics (excluded from hash)
     derived_metrics: {
       readiness,
+      activity_load,
     },
 
     confidence,

@@ -76,11 +76,14 @@ function normalizeDailySnapshot(row) {
       row.active_minutes ??
       row.moderate_activity_minutes ??
       null,
+    active_calories: row.active_calories ?? row.active_energy_burned ?? null,
+    exercise_minutes: row.exercise_minutes ?? row.exercise_time ?? null,
 
     // Vitals
     respiratory_rate: row.respiratory_rate ?? null,
     skin_temp_delta: row.skin_temp_delta ?? row.skin_temperature_delta ?? null,
     blood_oxygen: row.blood_oxygen ?? row.spo2 ?? null,
+    glucose_mg_dl: row.glucose_mg_dl ?? row.blood_glucose ?? null,
 
     // Optional wearable body comp fields (may be absent depending on vendor)
     weight_kg: row.weight_kg ?? row.body_weight_kg ?? null,

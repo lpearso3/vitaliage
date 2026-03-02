@@ -26,6 +26,9 @@ const {
   streamChatResponse,
   generateMetricExplanation,
   generateReadinessPlan,
+  generateFeedbackLoopInsights,
+  generateNutritionInsights,
+  checkSupplementInteractions,
 } = require("./services/ai/claudeService");
 
 const {
@@ -1963,6 +1966,108 @@ app.post("/ai/readiness-plan", async (req, res) => {
   }
 });
 
+/**
+ * POST /ai/feedback-loop
+ * Generate feedback loop insights analyzing readiness vs activity load relationship.
+ * Body: { userId }
+ */
+app.post("/ai/feedback-loop", async (req, res) => {
+  try {
+    const userId = getAppUserIdFromAny(req.body);
+    if (!userId) {
+      return res.status(400).json({ ok: false, error: "userId is required" });
+    }
+
+    const todayKey = new Date().toISOString().slice(0, 10);
+
+    // Check cache
+    const cacheKey = `feedback_loop_${todayKey}`;
+    const { data: cached } = await supabase
+      .from("ai_summaries")
+      .select("summary_text")
+      .eq("user_id", userId)
+      .eq("day_key", cacheKey)
+      .maybeSingle();
+
+    if (cached?.summary_text) {
+      return res.json({ ok: true, insights: cached.summary_text, cached: true });
+    }
+
+    // Build bundle and generate
+    const bundle = await buildResolvedBundle({ supabase, userId, bundleDayKey: todayKey, windowDays: 28 });
+
+    if (!bundle) {
+      return res.json({
+        ok: true,
+        insights: "Not enough data yet to analyze your readiness and activity patterns. Keep tracking and we'll identify your personal recovery sweet spot soon!",
+        cached: false,
+      });
+    }
+
+    const insights = await generateFeedbackLoopInsights(bundle);
+
+    // Cache it
+    await supabase.from("ai_summaries").upsert(
+      { user_id: userId, day_key: cacheKey, summary_text: insights, model: "claude-sonnet-4-5" },
+      { onConflict: "user_id,day_key" }
+    );
+
+    structuredLog("ai_feedback_loop", { userId, responseLength: insights.length });
+    return res.json({ ok: true, insights, cached: false });
+  } catch (err) {
+    console.error("Error in POST /ai/feedback-loop:", err);
+    return res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
+/**
+ * POST /ai/nutrition-insights
+ * Generate nutrition insights based on recent nutrition data.
+ * Body: { userId, nutritionData: { avgCalories, avgProtein, avgCarbs, avgFat, days } }
+ */
+app.post("/ai/nutrition-insights", async (req, res) => {
+  try {
+    const { userId, nutritionData } = req.body;
+    if (!userId) {
+      return res.status(400).json({ ok: false, error: "userId required" });
+    }
+    if (!nutritionData) {
+      return res.status(400).json({ ok: false, error: "nutritionData required" });
+    }
+
+    const todayKey = new Date().toISOString().slice(0, 10);
+    const cacheKey = `nutrition_${todayKey}`;
+
+    // Check cache
+    const { data: cached } = await supabase
+      .from("ai_summaries")
+      .select("summary_text")
+      .eq("user_id", userId)
+      .eq("day_key", cacheKey)
+      .maybeSingle();
+
+    if (cached?.summary_text) {
+      return res.json({ ok: true, insights: cached.summary_text, cached: true });
+    }
+
+    // Build bundle and generate
+    const bundle = await buildResolvedBundle({ supabase, userId, bundleDayKey: todayKey, windowDays: 28 });
+    const insights = await generateNutritionInsights(bundle, nutritionData);
+
+    // Cache it
+    await supabase.from("ai_summaries").upsert(
+      { user_id: userId, day_key: cacheKey, summary_text: insights, model: "claude-sonnet-4-5" },
+      { onConflict: "user_id,day_key" }
+    );
+
+    structuredLog("ai_nutrition_insights", { userId, days: nutritionData.days, responseLength: insights.length });
+    return res.json({ ok: true, insights, cached: false });
+  } catch (err) {
+    console.error("Error in POST /ai/nutrition-insights:", err);
+    return res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
 // =============================================================
 // WEARABLE INTEGRATION ENDPOINTS
 // =============================================================
@@ -3192,6 +3297,108 @@ app.get("/supplements/adherence", async (req, res) => {
     });
   } catch (err) {
     structuredLog("error_get_supplement_adherence", { error: err.message });
+    return res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
+/**
+ * POST /supplements/check-interactions
+ * AI-powered interaction checker for user's active supplements
+ * Query: userId (required)
+ * Returns: array of interaction warnings with severity levels
+ */
+app.post("/supplements/check-interactions", async (req, res) => {
+  try {
+    const { userId } = req.body || req.query;
+
+    if (!userId) {
+      return res.status(400).json({ ok: false, error: "userId_required" });
+    }
+
+    // Get all active supplements for user
+    const { data: supplements, error: suppErr } = await supabase
+      .from("supplement_protocols")
+      .select("id, name, dosage, frequency, times_per_day")
+      .eq("user_id", userId)
+      .eq("active", true);
+
+    if (suppErr) {
+      return res.status(500).json({ ok: false, error: suppErr.message });
+    }
+
+    if (!supplements || supplements.length === 0) {
+      return res.json({
+        ok: true,
+        userId,
+        supplementCount: 0,
+        interactions: [],
+        message: "No active supplements to check",
+      });
+    }
+
+    // Format supplements for Claude
+    const supplementsForAnalysis = supplements.map(s => ({
+      name: s.name,
+      dosage: s.dosage || "unspecified",
+      frequency: s.frequency || "daily",
+    }));
+
+    // Call Claude to check interactions
+    const interactions = await checkSupplementInteractions(supplementsForAnalysis);
+
+    // Transform interactions to include supplement IDs
+    const enrichedInteractions = interactions.map(interaction => {
+      // Find supplement IDs for those involved
+      const involvedIds = supplements
+        .filter(s => interaction.supplements_involved?.includes(s.name))
+        .map(s => s.id);
+
+      return {
+        ...interaction,
+        supplement_ids: involvedIds,
+      };
+    });
+
+    // Cache results in database if there are interactions
+    if (enrichedInteractions.length > 0) {
+      for (const interaction of enrichedInteractions) {
+        if (interaction.supplement_ids.length >= 2) {
+          // Only cache interactions between multiple supplements
+          const sortedIds = [...interaction.supplement_ids].sort();
+          await supabase
+            .from("supplement_interactions")
+            .upsert(
+              {
+                user_id: userId,
+                supplement_ids: sortedIds,
+                severity: interaction.severity,
+                summary: interaction.summary,
+                details: interaction.details,
+                checked_at: new Date().toISOString(),
+              },
+              { onConflict: "user_id,supplement_ids" }
+            );
+        }
+      }
+    }
+
+    structuredLog("supplement_interactions_checked", {
+      userId,
+      supplementCount: supplements.length,
+      interactionCount: enrichedInteractions.length,
+    });
+
+    return res.json({
+      ok: true,
+      userId,
+      supplementCount: supplements.length,
+      supplements: supplementsForAnalysis.map(s => s.name),
+      interactions: enrichedInteractions,
+      checkedAt: new Date().toISOString(),
+    });
+  } catch (err) {
+    console.error("Error in POST /supplements/check-interactions:", err);
+    structuredLog("error_supplement_interactions", { error: err.message });
     return res.status(500).json({ ok: false, error: err.message });
   }
 });
