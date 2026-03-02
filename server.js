@@ -99,7 +99,7 @@ app.use(
 
 // --- In-memory rate limiter ---
 const RATE_WINDOW_MS = 60 * 1000; // 1 minute
-const RATE_MAX_REQUESTS = 60;     // 60 req/min per IP
+const RATE_MAX_REQUESTS = 300;    // 300 req/min per IP (raised for backfill + app usage)
 const rateBuckets = new Map();
 
 // Cleanup stale buckets every 5 minutes
