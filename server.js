@@ -1878,7 +1878,7 @@ app.post("/ai/chat", async (req, res) => {
  */
 app.post("/ai/metric-explain", async (req, res) => {
   try {
-    const { userId, metric } = req.body;
+    const { userId, metric, detail } = req.body;
     if (!userId || !metric) {
       return res.status(400).json({ ok: false, error: "userId and metric required" });
     }
@@ -1905,7 +1905,7 @@ app.post("/ai/metric-explain", async (req, res) => {
 
     // Build bundle and generate
     const bundle = await buildResolvedBundle({ supabase, userId, bundleDayKey: todayKey, windowDays: 28 });
-    const explanation = await generateMetricExplanation(bundle, metric);
+    const explanation = await generateMetricExplanation(bundle, metric, detail);
 
     // Cache it
     await supabase.from("ai_summaries").upsert(

@@ -285,7 +285,7 @@ Guidelines:
  * @param {string} metric - Metric name (steps, sleep, heart_rate, hrv, readiness)
  * @returns {Promise<string>} Explanation text
  */
-async function generateMetricExplanation(bundle, metric) {
+async function generateMetricExplanation(bundle, metric, detail = "full") {
   const apiKey = getApiKey();
   const context = bundleToContext(bundle);
 
@@ -301,12 +301,12 @@ async function generateMetricExplanation(bundle, metric) {
 
   const body = {
     model: MODEL,
-    max_tokens: 500,
+    max_tokens: detail === "brief" ? 150 : 500,
     system: SYSTEM_PROMPT_METRIC,
     messages: [
       {
         role: "user",
-        content: `Here is my health data:\n\n${context}\n\nPlease explain my **${label}** metric — where I am now, how I'm trending, and what goal I should aim for.`,
+        content: `Here is my health data:\n\n${context}\n\n${detail === "brief" ? "In 2-3 sentences, briefly summarize" : "Please explain"} my **${label}** metric — where I am now, how I'm trending, and what goal I should aim for.`,
       },
     ],
   };
