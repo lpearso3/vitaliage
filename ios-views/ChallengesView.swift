@@ -283,6 +283,7 @@ struct ChallengesView: View {
         request.httpBody = jsonData
 
         _ = try? await URLSession.shared.data(for: request)
+        await MainActor.run { HapticManager.mediumTap() }
         await loadData()
     }
 }

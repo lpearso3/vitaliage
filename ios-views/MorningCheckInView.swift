@@ -16,7 +16,7 @@ struct MorningCheckInView: View {
     let userId: String
 
     private var greeting: String {
-        let hour = Calendar.current.component(.hour, from: Date())
+        let hour = Calendar.current.componen(.hour, from: Date())
         switch hour {
         case 5..<12: return "Good morning"
         case 12..<17: return "Good afternoon"
@@ -108,6 +108,7 @@ struct MorningCheckInView: View {
                 ForEach(1...5, id: \.self) { level in
                     Button {
                         value.wrappedValue = level
+                    HapticManager.lightTap()
                     } label: {
                         Circle()
                             .fill(level <= value.wrappedValue ? color : Color(.systemGray5))
@@ -159,7 +160,8 @@ struct MorningCheckInView: View {
                     errorMessage = error.localizedDescription
                     return
                 }
-                showSuccess = true
+                HapticManager.success()
+                    showSuccess = true
             }
         }.resume()
     }
