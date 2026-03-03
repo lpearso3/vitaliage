@@ -285,7 +285,7 @@ Guidelines:
  * @param {string} metric - Metric name (steps, sleep, heart_rate, hrv, readiness)
  * @returns {Promise<string>} Explanation text
  */
-async function generateMetricExplanation(bundle, metric, detail = "full") {
+async function generateMetricExplanation(bundle, metric, detail = "full", userAge = null, userSex = null) {
   const apiKey = getApiKey();
   const context = bundleToContext(bundle);
 
@@ -306,7 +306,7 @@ async function generateMetricExplanation(bundle, metric, detail = "full") {
     messages: [
       {
         role: "user",
-        content: `Here is my health data:\n\n${context}\n\n${detail === "brief" ? "In 2-3 sentences, briefly summarize" : "Please explain"} my **${label}** metric — where I am now, how I'm trending, and what goal I should aim for.`,
+        content: `${userAge || userSex ? `The user is${userAge ? ` ${userAge} years old` : ""}${userAge && userSex ? "," : ""}${userSex ? ` ${userSex}` : ""}. Interpret all metrics relative to their age and sex norms. ` : ""}Here is my health data:\n\n${context}\n\n${detail === "brief" ? "In 2-3 sentences, briefly summarize" : "Please explain"} my **${label}** metric — where I am now, how I'm trending, and what goal I should aim for.`,
       },
     ],
   };
@@ -507,7 +507,7 @@ async function generateReadinessPlan(bundle, score, band, reasons) {
     messages: [
       {
         role: "user",
-        content: `Here is my health data:\n\n${context}\n\nMy readiness score is ${score ?? "unknown"}/100 (state: ${band || "unknown"}).${reasonsText}\n\nPlease create my personalized plan for today.`,
+        content: `${userAge || userSex ? `The user is${userAge ? ` ${userAge} years old` : ""}${userAge && userSex ? "," : ""}${userSex ? ` ${userSex}` : ""}. Interpret all metrics relative to their age and sex norms. ` : ""}Here is my health data:\n\n${context}\n\nMy readiness score is ${score ?? "unknown"}/100 (state: ${band || "unknown"}).${reasonsText}\n\nPlease create my personalized plan for today.`,
       },
     ],
   };
